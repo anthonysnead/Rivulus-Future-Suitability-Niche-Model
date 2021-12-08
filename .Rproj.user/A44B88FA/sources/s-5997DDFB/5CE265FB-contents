@@ -1,0 +1,3245 @@
+---
+title: "<center> Ecological Niche Modeling for Kryptolebias marmoratus and Projecting Future Habitat Suitability <center>"
+author: "<center> Anthony Snead <center><br>"
+date: "<center> _`r Sys.Date()`_ <center>"
+output:
+  html_document:
+    code_folding: show
+    df_print: paged
+    theme: yeti
+    highlight: tango
+    toc: yes
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+    number_sections: true
+  pdf_document:
+    fig_caption: yes
+    toc: yes
+---
+
+```{r, Markdown-Setup, include=FALSE}
+library(rmarkdown)
+library(tinytex)
+library(knitr)
+knitr::opts_chunk$set(eval = FALSE, echo=TRUE, warning=FALSE, message=FALSE)
+knitr.duplicate.label = "allow"
+```
+
+## Introduction
+
+The following code was used to complete all niche modeling and analysis. The code is broken down into sections based on the analysis and the time period. Furthermore, comments are included to explain the code for future users. 
+
+## R packages used
+
+A variety of R packages was used for this analysis. All graphics and data wrangling were handled using the [tidyverse suite of packages](https://www.tidyverse.org/), cowplot, and ggpattern; however small table formatting and small graphic edits were done with external software including the Microsoft office suit and adobe creative cloud.  All packages used are available from the Comprehensive R Archive Network (CRAN) or Github.  
+
+```{r, Libraries}
+library(tidyverse)
+#for general data manipulation 
+library(dplyr)
+#for general data manipulation
+library(ggpattern)
+#for using patterns in ggplot
+library(broom)
+#used to tidy the multinomial logistic regression outputs
+library(cowplot)
+#used to combine ggplot graphs
+library(ENMeval)
+#used for maxent modeling
+library(rJava)
+#to use the java application of Maxent
+library(dismo)
+#to project and retrieve response curves
+library(raster)
+#used for raster analysis
+library(rgdal)
+#an extension of raster to import geotiffs
+library(qpcR)
+# to calculate the AICw of the filtered models
+library(nnet)
+#to run the multinomial logistic regressions
+library(sf)
+#to deal with spatial objects
+```
+
+## Enviromental Data
+
+### Preprocessing
+
+Current environmental data was downloaded from [WorldClim 2.1](https://www.worldclim.org/data/worldclim21.html) and [MARSPEC](http://marspec.weebly.com/modern-data.html). Future data was downloaded from [WorldClim 2.1](https://www.worldclim.org/data/v1.4/cmip5.html) and [BioOracle](https://www.bio-oracle.org/). All preprocessing of environmental data was conducted using the GIU software programs ArcGIS Pro and SAGA (System for Automate Geoscientific Analyses) described in the methods section of the publication. Therefore, the subsequent R code begins with correlation analysis and environmental data importing. 
+
+### Correlation
+After converting environmental rasters to point data in ArcGIS Pro, the data was exported and combined in one table. The table was used to compute Pearson's R correlation. The correlation coefficients were used to make filtering decisions and split create two variable sets to be model independently.The first chunk of code is an exploratory analysis used to investigate correlation coefficients; however this analysis was not used to specify variable sets.
+
+```{r, Exploritory-Correlation-Analysis}
+variable_table <- read.csv("C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/Current_Vars_Table.csv", header =  TRUE)
+#read in a table composed of environmental data exported from ArcGIS Pro.
+
+variable_table<- variable_table[,2:ncol(variable_table)]
+#remove pointid column so that only the environmental variables are left
+
+var_correlations <- cor(variable_table, method = "pearson")
+#compute Pearson's correlation matrix
+
+write.csv(var_correlations, "C:/Users/antho/OneDrive - The University of Alabama/Niche_Modeling_Rivulus/R code/Maxent_Rivulus_Climate_Change/correlatoin_matrix.csv")
+#write the entire correlation matrix to a csv for inclusion in the supplementary material
+
+Highly_Cor <- var_correlations %>% 
+#create data frame of highly correlated variables
+  as.table() %>%
+#make it a table
+  as.data.frame() %>%
+#convert to data frame
+  subset(Var1 != Var2 & abs(Freq) >= 0.9) %>%
+#subset so that I am not sub-setting self comparisons and the absolute value of the correlation is >= .9
+  filter(!duplicated(paste0(pmax(as.character(Var1), as.character(Var2)), pmin(as.character(Var1), as.character(Var2)))))
+#keep only unique variables with no self comparisons, as.character because Var1 and Var2 are factors
+
+#Highly_Cor is a table of pair wise correlations that are greater than 0.9.
+
+Highly_Cor_Var1_Count <- Highly_Cor %>%
+#create Var 1 count
+  dplyr::select(Var1)
+#select only var1
+
+Highly_Cor_Var2_Count <- Highly_Cor %>%
+#create var 2 count
+  dplyr::select(Var2) %>%
+#select only var2
+  rename(Var1 = Var2)
+#rename var 2 var 1 for rbind
+
+Highly_Cor_Count <- rbind(Highly_Cor_Var1_Count, Highly_Cor_Var2_Count) %>%
+#bind both counts above by Var 1 column
+  group_by(Var1) %>%
+#group by var 1
+  summarise(no_rows = length(Var1))
+#counts the number of occurrence of each variable
+
+#High_Cor_Count is a count of how time each variable is in a highly correlated pair. This helps you identify which variable would have the greatest impact on the number of highly correlated pair if it were removed
+```
+
+The next code chunk is the analysis to determine the Biologically informed variable set. You can find a detailed explanation of criteria used to select variables for the Biologically informed data set in the supplementary information.
+
+```{r, Correlation-Analysis-to-Create-the-Biologically-Informed-Variable-Set}
+Var_filtered_Biological<- variable_table %>% dplyr::select(!Temp_Seasonality & !Annual_Mean_Temp & !Precip_Driest_M & !Temp_Annual_Range & !Min_Temp_Coldest_M & !Mean_SST & !Annual_Range_SST & !Mean_Annual_SSS & !Precip_Seasonality & !Annual_Range_SSS)
+#removes highly correlated variables that do not have a strong biological rational for their inclusion
+
+var_correlations_filtered_Biological<- cor(Var_filtered_Biological, method = "pearson")
+#compute Pearson's correlation matrix
+
+Highly_Cor_filtered_Biological<- var_correlations_filtered_Biological %>%
+#create data frame of highly correlated variables
+  as.table() %>%
+#make it a table
+  as.data.frame() %>%
+#convert to data frame
+  subset(Var1 != Var2 & abs(Freq) >= 0.9) %>%
+#subset so that I am not sub-setting self comparisons and the absolute value of the correlation is >= .9
+  filter(!duplicated(paste0(pmax(as.character(Var1), as.character(Var2)), pmin(as.character(Var1), as.character(Var2)))))
+#keep only unique variables with no self comparisons, as.character because Var1 and Var2 are factors
+
+Highly_Cor_Var1_filtered_Biological <- Highly_Cor_filtered_Biological %>%
+#create Var 1 count
+  group_by(Var1) 
+#select only var1
+
+Highly_Cor_Var2_filtered_Biological<- Highly_Cor_filtered_Biological  %>%
+#create var 2 count
+    dplyr::select(Var2) %>%
+#select only var2
+  rename(Var1 = Var2)
+#rename var 2 var 1 for rbind
+
+Highly_Cor_Count_filtered_Biological<- rbind(Highly_Cor_Var1_filtered_Biological, Highly_Cor_Var2_filtered_Biological) %>%
+#bind both counts above by Var 1 column
+  group_by(Var1) %>% 
+#group by var 1
+  summarise(no_rows = length(Var1))
+#counts the number of occurrence of each variable
+
+### The above code is the same as the first chunk mentioned above and utilized to examine correlations after variables with weak biological rationales and high correlations were excluded
+```
+
+The code chunk gets the range, standard deviation, and mean for each variable.
+```{r, Retained Variable Stats}
+Summary_Stats <- Var_filtered_Biological %>%
+  tidyr::gather(., factor_key = TRUE) %>%
+  group_by(key) %>%
+  summarise(mean = mean(value), sd = sd(value), max = max(value), min = min(value))
+```
+
+The next code chunk is the analysis to determine the Pearson variable set.In the Pearson variable set one variables from each pair with a correlation coefficient above 0.9 was removed. The variable removed was done so based on the biology of our study species. A complete description of variable filtering can be found in the supplementary information.
+
+```{r, Correlation-Analysis-to-Create-the-Pearson-Variable-Set}
+Var_filtered_Pearson<- variable_table %>% dplyr::select(!Temp_Seasonality & !Annual_Mean_Temp & !Precip_Driest_M & !Temp_Annual_Range & !Min_Temp_Coldest_M & !Mean_SST & !Annual_Range_SST & !Mean_Annual_SSS & !Precip_Seasonality & !Annual_Range_SSS & !Precip_Coldest_Q & !Precip_Warmest_Q & !Mean_Temp_Coldest_Q & !Mean_Temp_Warmest_Q)
+#removes highly correlated variables that do not have a strong biological rational for their inclusion
+
+var_correlations_filtered_Pearson<- cor(Var_filtered_Pearson, method = "pearson")
+#compute Pearson's correlation matrix
+
+Highly_Cor_filtered_Pearson<- var_correlations_filtered_Pearson %>%
+#create data frame of highly correlated variables
+  as.table() %>%
+#make it a table
+  as.data.frame() %>%
+#convert to data frame
+  subset(Var1 != Var2 & abs(Freq) >= 0.9) %>%
+#subset so that I am not sub-setting self comparisons and the absolute value of the correlation is >= .9
+  filter(!duplicated(paste0(pmax(as.character(Var1), as.character(Var2)), pmin(as.character(Var1), as.character(Var2)))))
+#keep only unique variables with no self comparisons, as.character because Var1 and Var2 are factors
+
+                    
+Highly_Cor_Var1_filtered_Pearson <- Highly_Cor_filtered_Pearson  %>%
+#create Var 1 count
+  group_by(Var1) 
+#select only var1
+  
+
+Highly_Cor_Var2_filtered_Pearson<- Highly_Cor_filtered_Pearson  %>%
+#create var 2 count
+    dplyr::select(Var2) %>%
+#select only var2
+  rename(Var1 = Var2)
+#rename var 2 var 1 for rbind
+
+Highly_Cor_Count_filtered_Pearson<- rbind(Highly_Cor_Var1_filtered_Pearson, Highly_Cor_Var2_filtered_Pearson) %>% 
+#bind both counts above by Var 1 column
+  group_by(Var1) %>% 
+#group by var 1
+  summarise(no_rows = length(Var1))
+#counts the number of occurrence of each variable
+
+#The above code does the same analysis as the first exploratory analysis but for the Pearson variable set which removes one correlate from all highly correlated pairs.
+```
+
+## Maxent Modeling
+
+The following section outlines the Maxent modeling. It includes both importing the data and running models for both variable set.
+
+### Importing Data
+
+The following code imports the data into raster stack items for subsequent modeling.
+
+```{r, Importing-Rasters}
+files_Biological <- list.files( path = "C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/Data_Model_Development/Biological", full.names = TRUE )
+#gets a list of the files for an automated raster import (Biologically Informed). All files must be in the same folder.
+
+files_Pearson<- list.files( path = "C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/Data_Model_Development/Pearson", full.names = TRUE ) 
+#gets a list of the files for an automated raster import (Pearson). All files must be in the same folder.
+
+envs_biological <- stack(files_Biological)
+#load the Biologically Informed variable set in a raster stack
+
+envs_Pearson <- stack(files_Pearson)
+#load the Pearson variable set in a raster stack
+```
+The stack objects will be used to run all subsequent models.
+
+### Creating Objects for Maxent modeling
+
+The code creates the occurrence objects, background points object, and the block partition for my modeling.
+
+```{r, Creating-Maxent-Objects}
+occs <- read.csv("C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/Rivulus_Occurrence .csv", header = TRUE) %>%
+#import the points of occurrences
+dplyr::rename(x = Longitude , y = Latitude)
+occs.sp <- SpatialPoints(occs)
+#convert occs to .sp
+
+BG_R <- raster("C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/Data_Model_Development/BG_R.tif")
+#import the background sampling extent
+
+bg <- dismo::randomPoints(BG_R , n = 10000)
+# Randomly sample 10,000 background points from one background extent raster (only one per cell without replacement).
+
+blocks <- get.block(occs.sp, bg)
+#get geographically blocked partitioning
+```
+
+
+### Running Maxent
+
+The following code utilizes the java application of Maxent to test a range of regularization multiplier and feature classes for both variable sets.
+```{r, Maxent-Modeling}
+.jinit(classpath = NULL,
+   parameters = getOption("java.parameters"),
+   silent = FALSE, force.init = FALSE)
+#initialize R java to use the Maxent java application. You must have Maxent java application in the correct folder to utilize this.
+
+model_bio <- ENMevaluate(occ=occs.sp, env=envs_biological, bg.coords=bg, method='block', RMvalues=c(.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5), fc=c("L", "LQ", "Q", "LQH", "LH", "QH", "H"), algorithm='maxent.jar')
+#runs models at each rm value and each feature class for the biologically informed variable set
+
+model_Pearson <- ENMevaluate(occ=occs.sp, env=envs_Pearson, bg.coords=bg, method='block', RMvalues=c(.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5), fc=c("L", "LQ", "Q", "LQH", "LH", "QH", "H"), algorithm='maxent.jar')
+#runs models at each rm value and each feature class for the Pearson variable set 
+```
+
+### Results and Model Averaging
+
+##### Biologically Informed
+
+The following code is only for the Biologically informed variable set.
+
+###### Model Evaluation
+
+This code retrieves to model results table and recalculating the AICcw for the filtered models. It then saves each model that was retained to an object.
+```{r, Bio Model Evaluation}
+
+model_results_bio <- as.data.frame(model_bio@results) %>%
+#converts the results to a  data frame
+  filter(avg.test.AUC >= .6 & !is.na(AICc)) %>%
+#filters out NAs and test AUC below .65
+  arrange(AICc)
+#orders in ascending order by AICc
+
+AICc_vector_bio <- as.vector(model_results_bio$AICc)
+#creates a vector of the AICcs of the filtered data set
+
+AICw_bio <- akaike.weights(AICc_vector_bio)
+#calculates the AICw from the AIcc vector of the filtered data set
+
+model_results_bio <- model_results_bio%>%
+#overwrite model_results_bio
+  dplyr::select(-w.AIC) %>%
+#drops the current w.AIC
+  mutate(wAICc = AICw_bio$weights)
+#adds the new AIC weights based on the filtered model set the the results table
+
+
+
+AIC1_bio <- model_bio@models[[which(model_bio@results$settings=="LQ_1")]]
+#get the lowest AICc model
+
+AIC2_bio <- model_bio@models[[which(model_bio@results$settings == "Q_0.5")]]
+#gets second lowest AICc model
+
+AUC_bio <- model_bio@models[[which(model_bio@results$settings == "H_1.5")]]
+#gets highest AUC model
+
+OR10_bio <- model_bio@models[[which(model_bio@results$settings == "H_2")]]
+#gets lowest OR10 model
+
+Biological_model_Results_csv <- model_results_bio %>%
+  add_row(settings = "AICc_Avg", 
+          avg.test.AUC = (((model_results_bio[1,5] * model_results_bio[1,16]) + (model_results_bio[2,5] * model_results_bio[2,16]))/ (model_results_bio[1,16] + model_results_bio[2,16])),
+          avg.diff.AUC = (((model_results_bio[1,7] * model_results_bio[1,16]) + (model_results_bio[2,7] * model_results_bio[2,16]))/ (model_results_bio[1,16] + model_results_bio[2,16])),
+          avg.test.orMTP = (((model_results_bio[1,9] * model_results_bio[1,16]) + (model_results_bio[2,9] * model_results_bio[2,16]))/ (model_results_bio[1,16] + model_results_bio[2,16])),
+          avg.test.or10pct = (((model_results_bio[1,11] * model_results_bio[1,16]) + (model_results_bio[2,11] * model_results_bio[2,16]))/ (model_results_bio[1,16] + model_results_bio[2,16]))) %>%
+  dplyr::select(-features, - rm,-train.AUC, -var.test.AUC, - var.diff.AUC, -var.test.orMTP, - var.test.or10pct)
+#calculate averaged model statistics
+
+write.csv(Biological_model_Results_csv, "C:/Users/antho/OneDrive - The University of Alabama/Niche_Modeling_Rivulus/R code/Maxent_Rivulus_Climate_Change/Biological_model_results.csv")
+#write the model results to a csv
+```
+
+###### Model Averaging and Map Conversion
+
+This code chunk first converts the models to cloglog outputs using dismo. We also implement a natural model averaging approach on the outputs of the AICc models to get the model averaged output.
+
+```{r, Bio Suitability-Maps}
+AIC_1_cloglog_bio <- dismo::predict(AIC1_bio, envs_biological, args= "outputformat=cloglog")
+#convert the model to cloglog
+
+AIC_2_cloglog_bio <- dismo::predict(AIC2_bio, envs_biological, args= "outputformat=cloglog" )
+#convert the model to cloglog
+
+AIC_AVG_cloglog_bio <- ((AIC_1_cloglog_bio * model_results_bio[1,16]) + (AIC_2_cloglog_bio * model_results_bio[2,16])) / (model_results_bio[1,16] + model_results_bio[2,16])
+#model average the outputs
+
+AUC_cloglog_bio <- dismo::predict(AUC_bio, envs_biological, args= "outputformat=cloglog" )
+#convert the model to cloglog
+
+OR10_cloglog_bio <- dismo::predict(OR10_bio, envs_biological, args= "outputformat=cloglog" )
+#convert the model to cloglog
+```
+
+###### Variable Importance
+The following code is used to create a table of the percent contribution of each variable fore all Biologically informed models.
+
+```{r, Bio Percent-Contribution}
+AIC1_bio_var_importance <- var.importance(AIC1_bio) %>%
+#gets the percent contribution and the permutation importance
+  dplyr::select(-permutation.importance) %>%
+#remove permutation.importance as it is not very informative with correlated variables
+  arrange(-percent.contribution) %>%
+#arranges by percent contribution in descending order
+  rename(AIC1 = percent.contribution )
+
+AIC2_bio_var_importance<- var.importance(AIC2_bio) %>%
+#gets the percent contribution and the permutation importance
+  dplyr::select(-permutation.importance) %>%
+#remove permutation.importance as it is not very informative with correlated variables
+  arrange(-percent.contribution) %>%
+#arranges by percent contribution in descending order
+  rename(AIC2 = percent.contribution )
+
+AUC_bio_var_importance<- var.importance(AUC_bio) %>%
+#gets the percent contribution and the permutation importance
+  dplyr::select(-permutation.importance) %>%
+#remove permutation.importance as it is not very informative with correlated variables
+  arrange(-percent.contribution) %>%
+#arranges by percent contribution in descending order
+  rename(AUC = percent.contribution )
+
+OR10_bio_var_importance<- var.importance(OR10_bio) %>%
+#gets the percent contribution and the permutation importance
+  dplyr::select(-permutation.importance) %>%
+#remove permutation.importance as it is not very informative with correlated variables
+  arrange(-percent.contribution) %>%
+#arranges by percent contribution in descending order
+  rename(OR10 = percent.contribution )
+
+Var_Importance_Bio_Table <- full_join(AIC1_bio_var_importance, AIC2_bio_var_importance, by = "variable") %>%
+  full_join(., AUC_bio_var_importance, by = "variable") %>%
+  full_join(., OR10_bio_var_importance, by = "variable") %>% 
+  mutate(AIC_Avg = (((AIC1* model_results_bio[1,16]) + (AIC2 * model_results_bio[2,16])) / (model_results_bio[1,16] + model_results_bio[2,16]))) %>%
+  arrange(-AIC_Avg) %>%
+ rename(Variable = variable) %>%
+  rename( "AIC Avg" = AIC_Avg) %>%
+  mutate(Variable = recode(Variable,
+                           "SSS_S_M" = "Sea Surface Salinity of the Saltiest Month",
+                           "P_D_Q" = "Precipitation of the Driest Quarter",
+                           "Isotherm" = "Isothermality",
+                           "Mean_D_R" = "Mean Diurnal Range",
+                           "P_We_M" = "Precipitation of the Wettest Month",
+                           "P_We_Q" = "Precipitation of the Wettest Quarter",
+                           "SSS_F_M" = "Sea Surface Salinity of the Freshest Month",
+                           "SST_Wa_M" = "Sea Surface Temperature of the Warmest Month",
+                           "Max_T_Wa_M" = "Maximum Temperature of the Warmest Month",
+                           "Annual_P" = "Annual Precipitation",
+                           "Avg_T_D_Q" = "Mean Temperature of the Driest Quarter",
+                           "Avg_T_We_Q" = "Mean Temperature of the Wettest Quarter",
+                           "SST_C_M" = "Sea Surface Temperature of the Coldest Month",
+                           "Avg_T_Wa_Q" = "Mean Temperature of the Warmest Quarter",
+                           "P_Wa_Q" = "Precipitation of the Warmest Quarter",
+                           "SST_Wa_M" = "Sea Surface Temperature of the Warmest Month",
+                           "Avg_T_C_Q" = "Mean Temperature of the Coldest Quarter",
+                           "P_C_Q" = "Precipitation of the Coldest Quarter"))
+#creates a combined table of variable importance to be exported to a csv
+
+write.csv(Var_Importance_Bio_Table, "C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/Var_Importance_Bio.csv")
+#export variable importance
+```
+
+#### Pearson Variable Set
+
+The following code is only for the Pearson set.
+
+###### Model Evaluation
+
+This code retrieves to model results table and recalculate the AICc weights for the filtered models. It then saves each model that was retained to an object.
+
+```{r, Pearson Model-Evaluation}
+
+model_results_Pearson <- as.data.frame(model_Pearson@results) %>%
+#converts the results to a  data frame
+  filter(avg.test.AUC >= .6 & !is.na(AICc)) %>%
+#filters out NAs and test AUC below .65
+  arrange(AICc)
+#orders in ascending order by AICc
+
+AICc_vector_Pearson <- as.vector(model_results_Pearson$AICc)
+#creates a vector of the AICcs of the filtered data set
+
+AICw_Pearson <- akaike.weights(AICc_vector_Pearson)
+#calculates the AICw from the AIcc vector of the filtered data set
+
+model_results_Pearson <- model_results_Pearson%>%
+#overwrite model_results
+  dplyr::select(-w.AIC) %>%
+#drops the current w.AIC
+  mutate(wAICc = AICw_Pearson$weights)
+#adds the new AIC weights based on the filtered model set the the results table
+
+AIC1_Pearson <- model_Pearson@models[[which(model_Pearson@results$settings=="H_3.5")]]
+#get the lowest AICc model
+
+AIC2_Pearson <- model_Pearson@models[[which(model_Pearson@results$settings == "H_4.5")]]
+#get the 2nd lowest AICc model
+
+AIC3_Pearson <- model_Pearson@models[[which(model_Pearson@results$settings == "H_5")]]
+#get the 3rd lowest AICc model
+
+OR10_Pearson <- model_Pearson@models[[which(model_Pearson@results$settings == "H_2")]]
+#get the lowest OR10 model
+
+Pearson_model_csv <- model_results_Pearson %>%
+  add_row(settings = "AICc_Avg", 
+          avg.test.AUC = (((model_results_Pearson[1,5] * model_results_Pearson[1,16]) + (model_results_Pearson[2,5] * model_results_Pearson[2,16]) + (model_results_Pearson[3,5] * model_results_Pearson[3,16]))/ (model_results_Pearson[1,16] + model_results_Pearson[2,16] + model_results_Pearson[3,16])),
+          avg.diff.AUC = (((model_results_Pearson[1,7] * model_results_Pearson[1,16]) + (model_results_Pearson[2,7] * model_results_Pearson[2,16]) +(model_results_Pearson[3,7] * model_results_Pearson[3,16]))/ (model_results_Pearson[1,16] + model_results_Pearson[2,16] + model_results_Pearson[3,16])),
+          avg.test.orMTP = (((model_results_Pearson[1,9] * model_results_Pearson[1,16]) + (model_results_Pearson[2,9] * model_results_Pearson[2,16]) + (model_results_Pearson[3,5] * model_results_Pearson[3,9]))/ (model_results_Pearson[1,16] + model_results_Pearson[2,16] + model_results_Pearson[3,16])),
+          avg.test.or10pct = (((model_results_Pearson[1,11] * model_results_Pearson[1,16]) + (model_results_Pearson[2,11] * model_results_Pearson[2,16]) + (model_results_Pearson[3,11] * model_results_Pearson[3,16]))/ (model_results_Pearson[1,16] + model_results_Pearson[2,16] + model_results_Pearson[3,16]))) %>%
+  dplyr::select(-features, - rm,-train.AUC, -var.test.AUC, - var.diff.AUC, -var.test.orMTP, - var.test.or10pct)
+#calculate averaged model statistics
+
+write.csv(Pearson_model_csv, "C:/Users/antho/OneDrive - The University of Alabama/Niche_Modeling_Rivulus/R code/Maxent_Rivulus_Climate_Change/Pearson_model_Strict_results.csv")
+#writes the full model results to a csv
+```
+###### Model Averaging and Export
+
+This code chunk first converts the models to cloglog outputs using dismo. We also implement a natural model averaging approach on the outputs of the AICc models to get the model averaged output.
+
+```{r, Pearson Suitability-Maps}
+AIC1_cloglog_Pearson <- dismo::predict(AIC1_Pearson, envs_Pearson, args= "outputformat=cloglog")
+#convert the model to cloglog
+
+AIC2_cloglog_Pearson <- dismo::predict(AIC2_Pearson, envs_Pearson, args= "outputformat=cloglog" )
+#convert the model to cloglog
+
+AIC3_cloglog_Pearson <- dismo::predict(AIC3_Pearson, envs_Pearson, args= "outputformat=cloglog" )
+#convert the model to cloglog
+
+AIC_AVG_cloglog_Pearson <- ((AIC1_cloglog_Pearson * model_results_Pearson[1,16]) + (AIC2_cloglog_Pearson * model_results_Pearson[2,16]) + (AIC3_cloglog_Pearson * model_results_Pearson[3,16])) / (model_results_Pearson[1,16] + model_results_Pearson[2,16] + model_results_Pearson[3,16])
+#create the model averaged output
+
+OR10_cloglog_Pearson <- dismo::predict(OR10_Pearson, envs_Pearson, args= "outputformat=cloglog" )
+#convert the model to cloglog
+```
+
+###### Variable Importance
+The following code is used to create a table of the percent contribution of each variable fore all Pearson models.
+
+```{r, Pearson Percent-Contribution}
+AIC1_Pearson_var_importance <- var.importance(AIC1_Pearson) %>%
+#gets the percent contribution and the permutation importance
+  dplyr::select(-permutation.importance) %>%
+#get rid of permutation.importance
+  arrange(-percent.contribution) %>%
+#arranges by percent contribution in descending order
+  rename(AIC1 = percent.contribution )
+
+AIC2_Pearson_var_importance<- var.importance(AIC2_Pearson) %>%
+#gets the percent contribution and the permutation importance
+  dplyr::select(-permutation.importance) %>%
+#get rid of permutation.importance
+  arrange(-percent.contribution) %>%
+#arranges by percent contribution in descending order
+  rename(AIC2 = percent.contribution )
+
+AIC3_Pearson_var_importance<- var.importance(AIC3_Pearson) %>%
+#gets the percent contribution and the permutation importance
+  dplyr::select(-permutation.importance) %>%
+#get rid of permutation.importance
+  arrange(-percent.contribution) %>%
+#arranges by percent contribution in descending order
+  rename(AIC3 = percent.contribution )
+
+OR10_Pearson_var_importance<- var.importance(OR10_Pearson) %>%
+#gets the percent contribution and the permutation importance
+  dplyr::select(-permutation.importance) %>%
+#get rid of permutation.importance
+  arrange(-percent.contribution) %>%
+#arranges by percent contribution in descending order
+  rename(OR10 = percent.contribution )
+
+Var_Importance_Pearson_Table <- full_join(AIC1_Pearson_var_importance, AIC2_Pearson_var_importance, by = "variable") %>%
+  full_join(., AIC3_Pearson_var_importance, by = "variable") %>%
+  full_join(., OR10_Pearson_var_importance, by = "variable") %>%
+ mutate(AIC_Avg = ((AIC1 * model_results_Pearson[1,16]) + (AIC2 * model_results_Pearson[2,16]) + (AIC3 * model_results_Pearson[3,16]) / (model_results_Pearson[1,16] +  model_results_Pearson[2,16] + model_results_Pearson[3,16]))) %>%
+  arrange(-AIC_Avg) %>%
+  rename("AIC Avg" = AIC_Avg) %>%
+  rename(Variable = variable) %>%
+  mutate(Variable = recode(Variable,
+                           "SSS_S_M" = "Sea Surface Salinity of the Saltiest Month",
+                           "P_D_Q" = "Precipitation of the Driest Quarter",
+                           "Isotherm" = "Isothermality",
+                           "Mean_D_R" = "Mean Diurnal Range",
+                           "P_We_M" = "Precipitation of the Wettest Month",
+                           "P_We_Q" = "Precipitation of the Wettest Quarter",
+                           "SSS_F_M" = "Sea Surface Salinity of the Freshest Month",
+                           "SST_Wa_M" = "Sea Surface Temperature of the Warmest Month",
+                           "Max_T_Wa_M" = "Maximum Temperature of the Warmest Month",
+                           "Annual_P" = "Annual Precipitation",
+                           "Avg_T_D_Q" = "Mean Temperature of the Driest Quarter",
+                           "Avg_T_We_Q" = "Mean Temperature of the Wettest Quarter",
+                           "SST_C_M" = "Sea Surface Temperature of the Coldest Month"))
+#create table of variable importance for export
+
+write.csv(Var_Importance_Pearson_Table, "C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/Var_Importance_Pearson.csv")
+#export variable importance
+```
+
+#### Additional VIF Modeling
+
+The following code is to conduct an VIF model for comparison of variable selection metrics using variance inflation factor (VIF) to select variables thereby offering a complementary analysis to Pearson's r.
+
+##### VIF Variable Selection
+
+We first use a function to remove variable that high high multicolinearity using VIF. The function conducts a stepwise process whereby the variable with the highest VIF is removed until all variables remaining have a VIF less than the designated threshold (5).
+
+```{r, VIF Variable Selection}
+vif_func<-function(in_frame,thresh=10,trace=T,...){
+
+  library(fmsb)
+  
+  if(any(!'data.frame' %in% class(in_frame))) in_frame<-data.frame(in_frame)
+  
+  #get initial vif value for all comparisons of variables
+  vif_init<-NULL
+  var_names <- names(in_frame)
+  for(val in var_names){
+      regressors <- var_names[-which(var_names == val)]
+      form <- paste(regressors, collapse = '+')
+      form_in <- formula(paste(val, '~', form))
+      vif_init<-rbind(vif_init, c(val, VIF(lm(form_in, data = in_frame, ...))))
+      }
+  vif_max<-max(as.numeric(vif_init[,2]), na.rm = TRUE)
+
+  if(vif_max < thresh){
+    if(trace==T){ #print output of each iteration
+        prmatrix(vif_init,collab=c('var','vif'),rowlab=rep('',nrow(vif_init)),quote=F)
+        cat('\n')
+        cat(paste('All variables have VIF < ', thresh,', max VIF ',round(vif_max,2), sep=''),'\n\n')
+        }
+    return(var_names)
+    }
+  else{
+
+    in_dat<-in_frame
+
+    #backwards selection of explanatory variables, stops when all VIF values are below 'thresh'
+    while(vif_max >= thresh){
+      
+      vif_vals<-NULL
+      var_names <- names(in_dat)
+        
+      for(val in var_names){
+        regressors <- var_names[-which(var_names == val)]
+        form <- paste(regressors, collapse = '+')
+        form_in <- formula(paste(val, '~', form))
+        vif_add<-VIF(lm(form_in, data = in_dat, ...))
+        vif_vals<-rbind(vif_vals,c(val,vif_add))
+        }
+      max_row<-which(vif_vals[,2] == max(as.numeric(vif_vals[,2]), na.rm = TRUE))[1]
+
+      vif_max<-as.numeric(vif_vals[max_row,2])
+
+      if(vif_max<thresh) break
+      
+      if(trace==T){ #print output of each iteration
+        prmatrix(vif_vals,collab=c('var','vif'),rowlab=rep('',nrow(vif_vals)),quote=F)
+        cat('\n')
+        cat('removed: ',vif_vals[max_row,1],vif_max,'\n\n')
+        flush.console()
+        }
+      in_dat<-in_dat[,!names(in_dat) %in% vif_vals[max_row,1]]
+      }
+    return(names(in_dat))
+  }
+}
+
+Variables_VIF <- vif_func(in_frame=variable_table,thresh=5,trace=T)
+#get the variables with VIF less than 5 for exploratory modeling.
+```
+
+##### VIF Data Preparation
+Similar to above, we get a raster stack of the variables selected by a stepwise VIF variable selection conducted above.
+
+```{r, VIF Data Prep}
+files_VIF <- list.files(path = "C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/Data_Model_Development/VIF", full.names = TRUE )
+#gets a list of the files for the automated raster import (VIF) All files must be in the same folder.
+
+envs_VIF <- stack(files_VIF)
+#load the Pearson variable set in a raster stack
+```
+
+##### VIF Data Modeling
+
+Here we run maxent for the VIF variables similair to the biologically informed and Pearson variable set.
+```{r, VIF Maxent}
+model_VIF <- ENMevaluate(occ=occs.sp, env=envs_VIF, bg.coords=bg, method='block', RMvalues=c(.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5), fc=c("L", "LQ", "Q", "LQH", "LH", "QH", "H"), algorithm='maxent.jar')
+#runs models at each rm value and each feature class for the VIF variable set 
+```
+
+##### VIF Model Evaluation
+
+We evalute the model simialar to the other two variable sets. However, these are supplementary results considering the VIF filtering did not improve model fit above Pearson filtering.
+
+```{r, VIF Model Evaluation}
+model_results_VIF <- as.data.frame(model_VIF@results) %>%
+#converts the results to a  data frame
+  filter(avg.test.AUC >= .6 & !is.na(AICc)) %>%
+#filters out NAs and test AUC below .65
+  arrange(AICc)
+#orders in ascending order by AICc
+
+AICc_vector_VIF <- as.vector(model_results_VIF$AICc)
+#creates a vector of the AICcs of the filtered data set
+
+AICw_VIF <- akaike.weights(AICc_vector_VIF)
+#calculates the AICw from the AIcc vector of the filtered data set
+
+model_results_VIF <- model_results_VIF%>%
+#overwrite model_results_VIF
+  dplyr::select(-w.AIC) %>%
+#drops the current w.AIC
+  mutate(wAICc = AICw_VIF$weights)
+#adds the new AIC weights based on the filtered model set the the results table
+
+VIF_model_Results_csv <- model_results_VIF %>%
+  add_row(settings = "AICc_Avg", 
+          avg.test.AUC = (((model_results_VIF[1,5] * model_results_VIF[1,16]) + (model_results_VIF[2,5] * model_results_VIF[2,16]))/ (model_results_VIF[1,16] + model_results_VIF[2,16])),
+          avg.diff.AUC = (((model_results_VIF[1,7] * model_results_VIF[1,16]) + (model_results_VIF[2,7] * model_results_VIF[2,16]))/ (model_results_VIF[1,16] + model_results_VIF[2,16])),
+          avg.test.orMTP = (((model_results_VIF[1,9] * model_results_VIF[1,16]) + (model_results_VIF[2,9] * model_results_VIF[2,16]))/ (model_results_VIF[1,16] + model_results_VIF[2,16])),
+          avg.test.or10pct = (((model_results_VIF[1,11] * model_results_VIF[1,16]) + (model_results_VIF[2,11] * model_results_VIF[2,16]))/ (model_results_VIF[1,16] + model_results_VIF[2,16]))) %>%
+  dplyr::select(-features, - rm,-train.AUC, -var.test.AUC, - var.diff.AUC, -var.test.orMTP, - var.test.or10pct)
+#calculate averaged model statistics
+
+write.csv(VIF_model_Results_csv, "C:/Users/antho/OneDrive - The University of Alabama/Niche_Modeling_Rivulus/R code/Maxent_Rivulus_Climate_Change/VIF_model_results.csv")
+#write the model results to a csv
+```
+### Future Prediction
+
+The following code projects models onto future environmental conditions. Each code chunk is a different climate change scenario. The general layout begins with importing the climate data and matching spatial extent if necessary. Then, I project the models used to create the averaged model onto the new data. Finally, I calculate the model averaged output. 
+
+#### Importing Future Enviromental Data
+```{r, Importing-Future-Data-RCP-2.6}
+# Rasters were on slightly different extents. The extent sizes did not affect the raster cell alignment. Therefore, the rasters were coerced into the same extent.
+files_rcp_26_extent1 <- list.files( path = "C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/RCP26_2050_Coastal_Tiff_For_R/Just_Tiffs/Same_Extents", full.names = TRUE )
+# import the file names for raster stack
+
+RCP26_1 <- stack(files_rcp_26_extent1)
+#make raster stack
+
+files_rcp_26_extent2 <- list.files( path = "C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/RCP26_2050_Coastal_Tiff_For_R/Just_Tiffs/Same_Extent_2", full.names = TRUE )
+# import the file names for raster stack
+
+RCP26_2 <- stack(files_rcp_26_extent2)
+#make raster stack
+
+RCP26_2_ex <- raster::alignExtent(RCP26_2, RCP26_1)
+#create extent object to crop to.
+
+RCP26_1 <- raster::crop(RCP26_1, RCP26_2_ex)
+#had to make the RCP26_2 data set extent align with RCP26_1
+
+RCP_26 <- stack(RCP26_1, RCP26_2)
+#stack the final RCP26 with the same extent
+#### Biologically Informed
+```
+
+```{r, Importing-Future-Data-RCP-4.5}
+# Rasters were on slightly different extents. The extent sizes did not affect the raster cell alignment. Therefore, the rasters were coerced into the same extent.
+RCP_45_files_1 <- list.files( path = "C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/RCP45_2050_Coastal_Tiff_For_R/Maxent_Files/Same_Extent_1", full.names = TRUE )
+# import the file names for raster stack
+
+RCP_45_files_2 <- list.files( path = "C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/RCP45_2050_Coastal_Tiff_For_R/Maxent_Files/Same_Extent_2", full.names = TRUE )
+# import the file names for raster stack
+
+RCP_45_env_1 <- stack(RCP_45_files_1)
+#make raster stack
+
+RCP_45_env_2 <- stack(RCP_45_files_2)
+#make raster stack
+
+RCP45_2_ex <- raster::alignExtent(RCP_45_env_1, RCP_45_env_2)
+#create extent object
+
+RCP_45_env_2 <- raster::crop(RCP_45_env_2, RCP_45_env_1)
+#crop to smaller extent
+
+RCP_45 <- stack(RCP_45_env_1, RCP_45_env_2)
+#stack RCP 45 environmental Data
+```
+
+```{r, Importing-Future-Data-RCP-6.0}
+RCP_60_files <- list.files (path = "C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/RCP60_2050_Coastal_Tiffs_For_R/Maxent", full.names = TRUE)
+# import the file names for raster stack
+#all RCP 60 were on the same extent so no need to crop
+
+RCP_60_env <- stack(RCP_60_files)
+#make raster stack
+```
+
+```{r, Importing-Future-Data-RCP-8.5}
+RCP_85_files <- list.files( path = "C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/RCP85 2050 Coastal For Maxent/Maxent", full.names = TRUE )
+# import the file names for raster stack
+#all RCP 8.5 were on the same extent so no need to crop
+
+RCP_85_env <- stack(RCP_85_files)
+#make raster stack
+```
+
+#### Biologically Informed
+
+The following sections predict future suitability for all retained Biologically informed models. Each chunk is a different climate change scenario. 
+
+```{r, Bio RCP-2.6}
+RCP_26_AIC1_bio <- dismo::predict(AIC1_bio, RCP_26, args= "outputformat=cloglog")
+#project the lowest AIC model on to future climate data.
+
+RCP_26_AIC2_bio <- dismo::predict(AIC2_bio, RCP_26, args= "outputformat=cloglog")
+#project the 2nd lowest AIC model on to future climate data
+
+RCP26_AIC_AVG_cloglog_bio <- ((RCP_26_AIC1_bio * model_results_bio[1,16]) + (RCP_26_AIC2_bio * model_results_bio[2,16])) / (model_results_bio[1,16] + model_results_bio[2,16])
+#model average results to create RCP 2.6 predictions
+```
+
+```{r, Bio RCP-4.5}
+RCP_45_AIC1_bio <-  dismo::predict(AIC1_bio, RCP_45, args= "outputformat=cloglog")
+#project the lowest AIC model on to future climate data.
+
+RCP_45_AIC2_bio <-  dismo::predict(AIC2_bio, RCP_45, args= "outputformat=cloglog")
+#project the 2nd lowest AIC model on to future climate data
+
+RCP45_AIC_AVG_cloglog_bio <- ((RCP_45_AIC1_bio * model_results_bio[1,16]) + (RCP_45_AIC2_bio * model_results_bio[2,16])) / (model_results_bio[1,16] + model_results_bio[2,16])
+#model average results to create RCP 4.5 predictions
+```
+
+```{r, Bio RCP-6.0}
+RCP_60_AIC1_bio <-  dismo::predict(AIC1_bio, RCP_60_env, args= "outputformat=cloglog")
+#project the lowest AIC model on to future climate data.
+
+RCP_60_AIC2_bio <-  dismo::predict(AIC2_bio, RCP_60_env, args= "outputformat=cloglog")
+#project the 2nd lowest AIC model on to future climate data
+
+RCP60_AIC_AVG_cloglog_bio <- ((RCP_60_AIC1_bio * model_results_bio[1,16]) + (RCP_60_AIC2_bio * model_results_bio[2,16])) / (model_results_bio[1,16] + model_results_bio[2,16])
+#model average results to create RCP 6.0 predictions
+```
+
+```{r, Bio RCP-8.5}
+RCP_85_AIC1_bio <-  dismo::predict(AIC1_bio, RCP_85_env, args= "outputformat=cloglog")
+#project the lowest AIC model on to future climate data.
+
+RCP_85_AIC2_bio <-  dismo::predict(AIC2_bio, RCP_85_env, args= "outputformat=cloglog")
+#project the 2nd lowest AIC model on to future climate data
+
+RCP85_AIC_AVG_cloglog_bio <- ((RCP_85_AIC1_bio * model_results_bio[1,16]) + (RCP_85_AIC2_bio * model_results_bio[2,16])) / (model_results_bio[1,16] + model_results_bio[2,16])
+#model average results to create RCP 8.5 predictions
+```
+
+The following code ensures that all maps are on the same extent for downstream analysis.
+```{r, Bio Match-Extents}
+Future_exents <- raster::alignExtent(RCP26_AIC_AVG_cloglog_bio, AIC_AVG_cloglog_bio)
+#create extent for all future model rasters
+
+AIC_AVG_cloglog_bio_2 <- raster::crop(AIC_AVG_cloglog_bio, Future_exents)
+#crop Current AIC AVG map to future extents 
+
+RCP45_AIC_AVG_cloglog_bio <- raster::crop(RCP45_AIC_AVG_cloglog_bio, Future_exents)
+#crop RCP 4.5 output to future extents
+
+RCP60_AIC_AVG_cloglog_bio <- raster::crop(RCP60_AIC_AVG_cloglog_bio, Future_exents)
+#crop RCP 6.0 output to future extents
+
+RCP85_AIC_AVG_cloglog_bio <- raster::crop(RCP85_AIC_AVG_cloglog_bio, Future_exents)
+#crop RCP 8.5 output to future extents
+```
+
+The following code write all the files as geotiffs for visualization in ArcGIS Pro.
+```{r, Bio Write-Geotiffs}
+
+writeRaster(AIC_AVG_cloglog_bio_2, "C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/Habitat Suitibility Maps from R/Biological_AIC_Avg_Cloglog.tif", format = "GTiff")
+#write geotiff for visualization in ArcGIS Pro
+
+writeRaster(RCP26_AIC_AVG_cloglog_bio, "C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/Habitat Suitibility Maps from R/Biological_AIC_Avg_RCP_26_Cloglog.tif" )
+#write geotiff for visualization in ArcGIS Pro
+
+writeRaster(RCP45_AIC_AVG_cloglog_bio, "C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/Habitat Suitibility Maps from R/Biological_AIC_Avg_RCP_45_Cloglog.tif" )
+#write geotiff for visualization in ArcGIS Pro
+
+writeRaster(RCP60_AIC_AVG_cloglog_bio, "C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/Habitat Suitibility Maps from R/Biological_AIC_Avg_RCP_60_Cloglog.tif" )
+#write geotiff for visualization in ArcGIS Pro
+
+writeRaster(RCP85_AIC_AVG_cloglog_bio, "C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/Habitat Suitibility Maps from R/Biological_AIC_Avg_RCP_85_Cloglog.tif" )
+#write geotiff for visualization in ArcGIS Pro
+```
+
+#### Pearson
+
+The following sections predict future suitability for all retained Pearson models. Each chunk is a different climate change scenario.
+```{r, Pearson RCP-2.6}
+RCP_26_AIC1_Pearson <- dismo::predict(AIC1_Pearson, RCP_26, args= "outputformat=cloglog")
+#project the lowest AIC model on to future climate data
+
+RCP_26_AIC2_Peason <- dismo::predict(AIC2_Pearson, RCP_26, args= "outputformat=cloglog")
+#project the 2nd lowest AIC model on to future climate data
+
+RCP_26_AIC3_Pearson <- dismo::predict(AIC3_Pearson, RCP_26, args= "outputformat=cloglog")
+#project the 2nd lowest AIC model on to future climate data
+
+RCP26_AIC_AVG_cloglog_Pearson <- ((RCP_26_AIC1_Pearson * model_results_Pearson[1,16]) + (RCP_26_AIC2_Peason * model_results_Pearson[2,16]) + (RCP_26_AIC3_Pearson * model_results_Pearson[3,16])) / (model_results_Pearson[1,16] + model_results_Pearson[2,16] + model_results_Pearson[3,16])
+#average the outputs for averaged model
+```
+
+```{r, Pearson RCP-4.5}
+RCP_45_AIC1_Pearson <- dismo::predict(AIC1_Pearson, RCP_45, args= "outputformat=cloglog")
+#project the lowest AIC model on to future climate data.
+
+RCP_45_AIC2_Pearson <- dismo::predict(AIC2_Pearson, RCP_45, args= "outputformat=cloglog")
+#project the 2nd lowest AIC model on to future climate data
+
+RCP_45_AIC3_Pearson <- dismo::predict(AIC3_Pearson, RCP_45, args= "outputformat=cloglog")
+#project the 2nd lowest AIC model on to future climate data
+
+RCP45_AIC_AVG_cloglog_Pearson <- ((RCP_45_AIC1_Pearson * model_results_Pearson[1,16]) + (RCP_45_AIC2_Pearson * model_results_Pearson[2,16]) + (RCP_45_AIC3_Pearson * model_results_Pearson[3,16])) / (model_results_Pearson[1,16] + model_results_Pearson[2,16] + model_results_Pearson[3,16])
+```
+
+```{r, Pearson RCP-6.0}
+RCP_60_AIC1_Pearson <- dismo::predict(AIC1_Pearson, RCP_60_env, args= "outputformat=cloglog")
+#project the lowest AIC model on to future climate data.
+
+RCP_60_AIC2_Pearson <- dismo::predict(AIC2_Pearson, RCP_60_env, args= "outputformat=cloglog")
+#project the 2nd lowest AIC model on to future climate data
+
+RCP_60_AIC3_Pearson <- dismo::predict(AIC3_Pearson, RCP_60_env, args= "outputformat=cloglog")
+#project the 2nd lowest AIC model on to future climate data
+
+RCP60_AIC_AVG_cloglog_Pearson <- ((RCP_60_AIC1_Pearson * model_results_Pearson[1,16]) + (RCP_60_AIC2_Pearson * model_results_Pearson[2,16]) + (RCP_60_AIC3_Pearson * model_results_Pearson[3,16])) / (model_results_Pearson[1,16] + model_results_Pearson[2,16] + model_results_Pearson[3,16])
+```
+
+```{r, Pearson RCP-8.5}
+RCP_85_AIC1_Pearson <- dismo::predict(AIC1_Pearson, RCP_85_env, args= "outputformat=cloglog")
+#project the lowest AIC model on to future climate data.
+
+RCP_85_AIC2_Pearson <- dismo::predict(AIC2_Pearson, RCP_85_env, args= "outputformat=cloglog")
+#project the 2nd lowest AIC model on to future climate data
+
+RCP_85_AIC3_Pearson <- dismo::predict(AIC3_Pearson, RCP_85_env, args= "outputformat=cloglog")
+#project the 2nd lowest AIC model on to future climate data
+
+RCP85_AIC_AVG_cloglog_Pearson <- ((RCP_85_AIC1_Pearson * model_results_Pearson[1,16]) + (RCP_85_AIC2_Pearson * model_results_Pearson[2,16]) + (RCP_85_AIC3_Pearson * model_results_Pearson[3,16])) / (model_results_Pearson[1,16] + model_results_Pearson[2,16] + model_results_Pearson[3,16])
+```
+
+The following code write all the files as geotiffs for visualization in ArcGIS Pro.
+```{r, Pearson Write-Geotiffs}
+
+AIC_AVG_cloglog_Pearson_2 <- raster::crop(AIC_AVG_cloglog_Pearson, Future_exents)
+RCP45_AIC_AVG_cloglog_Pearson <- raster::crop(RCP45_AIC_AVG_cloglog_Pearson, Future_exents)
+RCP60_AIC_AVG_cloglog_Pearson <- raster::crop(RCP60_AIC_AVG_cloglog_Pearson, Future_exents)
+RCP85_AIC_AVG_cloglog_Pearson <- raster::crop(RCP_85_AIC3_Pearson, Future_exents)
+#the above four lines of code is just getting all the outputs to be the same spatial extent. The extents are just slightly off. The slight extent difference did not affect the grid alignment.
+
+
+writeRaster(AIC_AVG_cloglog_Pearson_2, "C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/Habitat Suitibility Maps from R/Pearson_AIC_Avg_Cloglog.tif", format = "GTiff")
+#write raster for ArcGIS Pro visualization 
+
+writeRaster(RCP26_AIC_AVG_cloglog_Pearson, "C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/Habitat Suitibility Maps from R/Pearson_AIC_Avg_RCP_26_Cloglog.tif", format = "GTiff")
+#write raster for ArcGIS Pro visualization 
+
+writeRaster(RCP45_AIC_AVG_cloglog_Pearson, "C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/Habitat Suitibility Maps from R/Pearson_AIC_Avg_RCP_45_Cloglog.tif", format = "GTiff")
+#write raster for ArcGIS Pro visualization 
+
+writeRaster(RCP60_AIC_AVG_cloglog_Pearson, "C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/Habitat Suitibility Maps from R/Pearson_AIC_Avg_RCP_60_Cloglog.tif", format = "GTiff")
+#write raster for ArcGIS Pro visualization 
+
+writeRaster(RCP85_AIC_AVG_cloglog_Pearson, "C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/Habitat Suitibility Maps from R/Pearson_AIC_Avg_RCP_85_Cloglog.tif", format = "GTiff")
+
+```
+
+### Niche Overlap
+
+This code calculated Schoener's D between all maps (current and future).
+```{r, Niche-Overlap}
+AIC_1_cloglog_bio_2 <- raster::crop(AIC_1_cloglog_bio, Future_exents)
+AIC_2_cloglog_bio_2 <- raster::crop(AIC_2_cloglog_bio, Future_exents)
+AUC_cloglog_bio_2 <- raster::crop(AUC_cloglog_bio, Future_exents)
+OR10_cloglog_bio_2 <- raster::crop(OR10_cloglog_bio, Future_exents)
+AIC1_cloglog_Pearson_2 <- raster::crop(AIC1_cloglog_Pearson, Future_exents)
+AIC2_cloglog_Pearson_2 <- raster::crop(AIC2_cloglog_Pearson, Future_exents)
+AIC3_cloglog_Pearson_2 <- raster::crop(AIC3_cloglog_Pearson, Future_exents)
+OR10_cloglog_Pearson_2 <- raster::crop(OR10_cloglog_Pearson, Future_exents)
+#get all the Rasters on the same extent
+
+All_Current_Future_Model_Raster_Stack <- stack(AIC_1_cloglog_bio_2, AIC_2_cloglog_bio_2, AUC_cloglog_bio_2, OR10_cloglog_bio_2, AIC_AVG_cloglog_bio_2, AIC1_cloglog_Pearson_2, AIC2_cloglog_Pearson_2, AIC3_cloglog_Pearson_2, OR10_cloglog_Pearson_2, AIC_AVG_cloglog_Pearson_2, RCP26_AIC_AVG_cloglog_bio, RCP45_AIC_AVG_cloglog_bio, RCP60_AIC_AVG_cloglog_bio, RCP85_AIC_AVG_cloglog_bio, RCP26_AIC_AVG_cloglog_Pearson, RCP45_AIC_AVG_cloglog_Pearson, RCP60_AIC_AVG_cloglog_Pearson, RCP85_AIC_AVG_cloglog_Pearson )
+#create one raster stack with all model outputs
+
+D_statistics_All_Current_Future <- calc.niche.overlap(All_Current_Future_Model_Raster_Stack) 
+#compute niche overlap
+
+rownames(D_statistics_All_Current_Future) <- c("AIC1_Bio", "AIC2_Bio", "AUC_Bio", "OR10_Bio","AIC_Avg_Bio", "AIC1_Strict", "AIC2_Strict", "AIC3_Strict","OR1_Strict", "AIC_Avg_Strict", "RCP26_Bio", "RCP45_Bio", "RCP60_Bio", "RCP85_Bio", "RCP26_Strict", "RCP45_Strict", "RCP60_Strict", "RCP85_Bio")
+colnames(D_statistics_All_Current_Future) <- c("AIC1_Bio", "AIC2_Bio", "AUC_Bio", "OR10_Bio","AIC_Avg_Bio", "AIC1_Strict", "AIC2_Strict", "AIC3_Strict","OR1_Strict", "AIC_Avg_Strict", "RCP26_Bio", "RCP45_Bio", "RCP60_Bio", "RCP85_Bio", "RCP26_Strict", "RCP45_Strict", "RCP60_Strict", "RCP85_Strict")
+#change the names of the columns and rows.
+
+D_statistics_All_Current_Future_Matrix_Sym <- Matrix::forceSymmetric(D_statistics_All_Current_Future,uplo="L")
+D_statistics_All_Current_Future_Matrix_Sym[is.na(D_statistics_All_Current_Future_Matrix_Sym)] <-1 
+#makes the matrix symmetric
+
+D_statistics_All_Current_Future_Table <- D_statistics_All_Current_Future %>%
+  as.table() %>%
+  as.data.frame() %>%
+  drop_na()
+#creates a pairwise table for easy exploration 
+```
+
+***
+
+
+
+## Habitat Suitability Change
+The following code chunks first classify habitat based on habitat suitability scores before calculating if the suitability classification increased, decreased, or remained unchanged.The table is then used to run a multinomial logistic regression to evaluate if region is a significant predictor of transition. The data sets used were created by converting habitat suitability maps as point data and assigning each point a region using the criteria in the methods section. The points were then exported and combined to create the final tables. 
+
+### Biologically Informed
+
+```{r, Bio Multinomial-Regression}
+
+Keys <- sf::st_sf(sf::st_sfc((sf::st_polygon(list(Keys = cbind(x = c(-80.233737, -80.088813, -80.182135, -81.191639, -82.421915, -82.025516,
+-81.543536, -81.134018, -80.973724, -80.788178, -80.714619, -80.673021, -80.624591, -80.53566, -80.54115, -80.503821, -80.477075, -80.42038, -80.369877, -80.345193, -80.274359, -80.233737),
+                                        y = c(25.588852, 25.585558, 25.146396, 24.278309, 24.487718, 24.722605, 24.828004, 24.85655, 24.825808, 24.882899, 24.904858, 24.964025, 24.972928, 25.045389, 25.083816, 25.114557, 25.161526, 25.171648, 25.248502, 25.310211, 25.373663, 25.588852
+)))))))
+# this creates a polygon around the keys
+
+ Biological_Logistic_DF <- as.data.frame(RCP60_AIC_AVG_cloglog_bio, xy = TRUE) %>%
+   dplyr::mutate(Scenario = "RCP60") %>%
+   bind_rows(as.data.frame(RCP85_AIC_AVG_cloglog_bio, xy = TRUE) %>%
+   dplyr::mutate(Scenario = "RCP85")) %>%
+   bind_rows(as.data.frame(RCP45_AIC_AVG_cloglog_bio, xy = TRUE) %>%
+   dplyr::mutate(Scenario = "RCP45")) %>%
+   bind_rows(as.data.frame(RCP26_AIC_AVG_cloglog_bio, xy = TRUE) %>%
+   dplyr::mutate(Scenario = "RCP26"))%>%
+   bind_rows(as.data.frame(AIC_AVG_cloglog_bio, xy = TRUE) %>%
+   dplyr::mutate(Scenario = "Current")) %>%
+  drop_na() %>%
+   #makes on large data frame with all of the suitability scores for each model
+   sf::st_as_sf(x = ., coords = c("x", "y")) %>%
+   #makes it an sf object
+   cbind(sf::st_coordinates(.)) %>%
+   #binds the coordinates as columns
+   dplyr::rename(x = X, y = Y) %>%
+   #rename the coordinates
+  sf::st_join(Keys, .) %>%
+   #get only rows that intersect with the keys
+   sf::st_drop_geometry(.) %>%
+   #drop the geometry to make it a data frame again
+   dplyr::mutate(Region = "Keys") %>%
+   #give all points left a new column filled with Keys as the region
+   bind_rows(as.data.frame(RCP60_AIC_AVG_cloglog_bio, xy = TRUE) %>%
+   dplyr::mutate(Scenario = "RCP60",
+                 Region = NA)) %>%
+   bind_rows(as.data.frame(RCP85_AIC_AVG_cloglog_bio, xy = TRUE) %>%
+   dplyr::mutate(Scenario = "RCP85",
+                 Region = NA)) %>%
+   bind_rows(as.data.frame(RCP45_AIC_AVG_cloglog_bio, xy = TRUE) %>%
+   dplyr::mutate(Scenario = "RCP45",
+                 Region = NA)) %>%
+   bind_rows(as.data.frame(RCP26_AIC_AVG_cloglog_bio, xy = TRUE) %>%
+   dplyr::mutate(Scenario = "RCP26",
+                 Region = NA)) %>%
+   bind_rows(as.data.frame(AIC_AVG_cloglog_bio, xy = TRUE) %>%
+   dplyr::mutate(Scenario = "Current",
+                 Region = NA)) %>%
+   #bind rows again to get the other regions
+   dplyr::rename(Suitibility = layer) %>%
+   #rename the layer
+   dplyr::mutate(x = round(x,2),
+                 y = round(y,2)) %>%
+   #round to 2 decimal places because we have 1 km resolution and extents can be slightly off
+   distinct(x,y, Scenario, .keep_all = TRUE) %>%
+   #keep only distinct rows
+  mutate(Region = case_when(Region == "Keys" ~ "Keys",
+                            y >= 28.5 & x <= -82 ~ "Northwest",
+                            y >= 28.5 & x > -82 ~ "Northeast",
+                            y < 28.5 & y >= 26.5 & x <= -81.5  ~ "Central West",
+                            y < 28.5 & y >= 26.5 & x > -81.5  ~ "Central East",
+                            y < 26.5 & is.na(Region) ~ "South")) %>%
+   #fill region with the correct area
+   drop_na() %>%
+   #drop any NAs that do not meet the criteria
+   tidyr::pivot_wider(names_from = Scenario, values_from = Suitibility) %>%
+   #make into wide
+   drop_na() %>%
+   #drop missing values
+  mutate(Current_Classification = case_when(Current < .25 ~ "low",
+                                            Current >= .25 & Current < .5 ~ "medium",
+                                            Current >= .5 ~"high"),
+         RCP26_Classification = case_when(RCP26 < .25 ~ "low",
+                                            RCP26 >= .25 & RCP26 < .5 ~ "medium",
+                                            RCP26 >= .5 ~"high"),
+         RCP45_Classification = case_when(RCP45 < .25 ~ "low",
+                                            RCP45 >= .25 & RCP45 < .5 ~ "medium",
+                                            RCP45 >= .5 ~"high"),
+         RCP60_Classification = case_when(RCP60 < .25 ~ "low",
+                                            RCP60 >= .25 & RCP60 < .5 ~ "medium",
+                                            RCP60 >= .5 ~"high"),
+         RCP85_Classification = case_when(RCP85 < .25 ~ "low",
+                                            RCP85 >= .25 & RCP85 < .5 ~ "medium",
+                                            RCP85 >= .5 ~"high")) %>%
+#the above code classifies the current and each RCP as low, medium, or high
+  unite("Current_RCP26", c("Current_Classification", "RCP26_Classification"), sep = "_", remove = FALSE) %>%
+  unite("Current_RCP45", c("Current_Classification", "RCP45_Classification"), sep = "_", remove = FALSE) %>%
+  unite("Current_RCP60", c("Current_Classification", "RCP60_Classification"), sep = "_", remove = FALSE) %>%
+  unite("Current_RCP85", c("Current_Classification", "RCP85_Classification"), sep = "_", remove = FALSE) %>%
+#this creates a new column with both classification for current and each RCP
+   mutate_at(c("Region", "Current_RCP26", "Current_RCP45", "Current_RCP60", "Current_RCP85" ), funs(factor(.))) %>%
+  mutate(RCP26_Change = case_when(Current_RCP26 == "low_low" | Current_RCP26 == "medium_medium" | Current_RCP26 == "high_high" ~ "Unchanged",
+                                  Current_RCP26 == "low_medium" | Current_RCP26 == "low_high" | Current_RCP26 =="medium_high" ~ "Increased",
+                                  Current_RCP26 == "medium_low" | Current_RCP26 == "high_low" |Current_RCP26 == "high_medium" ~ "Decreased")) %>%
+    mutate(RCP45_Change = case_when(Current_RCP45 == "low_low" | Current_RCP45 == "medium_medium" | Current_RCP45 == "high_high" ~ "Unchanged",
+                                  Current_RCP45 == "low_medium" | Current_RCP45 == "low_high" | Current_RCP45 =="medium_high" ~ "Increased",
+                                  Current_RCP45 == "medium_low" | Current_RCP45 == "high_low" |Current_RCP45 == "high_medium" ~ "Decreased")) %>%
+    mutate(RCP60_Change = case_when(Current_RCP60 == "low_low" | Current_RCP60 == "medium_medium" | Current_RCP60 == "high_high" ~ "Unchanged",
+                                  Current_RCP60 == "low_medium" | Current_RCP60 == "low_high" | Current_RCP60 =="medium_high" ~ "Increased",
+                                  Current_RCP60 == "medium_low" | Current_RCP60 == "high_low" |Current_RCP60 == "high_medium" ~ "Decreased")) %>%
+    mutate(RCP85_Change = case_when(Current_RCP85 == "low_low" | Current_RCP85 == "medium_medium" | Current_RCP85 == "high_high" ~ "Unchanged",
+                                  Current_RCP85 == "low_medium" | Current_RCP85 == "low_high" | Current_RCP85 =="medium_high" ~ "Increased",
+                                  Current_RCP85 == "medium_low" | Current_RCP85 == "high_low" |Current_RCP85 == "high_medium" ~ "Decreased")) %>%
+#this classifies each category as increased, decreasing, or unchanged
+   mutate_at(c("RCP26_Change", "RCP45_Change", "RCP60_Change", "RCP85_Change" ), funs(factor(.)))
+#this just makes each column a factor for the multinomial regression. 
+
+Biological_Logistic_DF$RCP26_Change<- relevel(Biological_Logistic_DF$RCP26_Change, ref = "Unchanged")
+#make reference unchanged
+
+Bio_RCP26_Change_multinom.fit <- multinom(RCP26_Change ~ Region - 1, data = Biological_Logistic_DF )
+#run multinomial regression
+
+Bio_RCP26_Change_Tidy <-tidy(Bio_RCP26_Change_multinom.fit) %>%
+  mutate(Probability = ((exp(estimate)/(1 + exp(estimate))))) %>%
+  mutate(Region = as.character(gsub("Region", "", term))) %>%
+  mutate(RCP = "RCP26")
+#create table with probabilities in addition to log odds
+
+Biological_Logistic_DF$RCP45_Change<- relevel(Biological_Logistic_DF$RCP45_Change, ref = "Unchanged")
+#make reference unchanged
+
+Bio_RCP45_Change_multinom.fit <- multinom(RCP45_Change ~ Region - 1, data = Biological_Logistic_DF )
+#run multinomial regression
+
+Bio_RCP45_Change_Tidy <-tidy(Bio_RCP45_Change_multinom.fit) %>%
+  mutate(Probability = ((exp(estimate)/(1 + exp(estimate))))) %>%
+  mutate(Region = as.character(gsub("Region", "", term))) %>%
+  mutate(RCP = "RCP45")
+#create table with probabilities in addition to log odds
+
+Biological_Logistic_DF$RCP60_Change<- relevel(Biological_Logistic_DF$RCP60_Change, ref = "Unchanged")
+#make reference unchanged
+
+Bio_RCP60_Change_multinom.fit <- multinom(RCP60_Change ~ Region - 1, data = Biological_Logistic_DF )
+#run multinomial regression
+
+Bio_RCP60_Change_Tidy <-tidy(Bio_RCP60_Change_multinom.fit) %>%
+  mutate(Probability = ((exp(estimate)/(1 + exp(estimate)))))%>%
+    mutate(Region = as.character(gsub("Region", "", term))) %>%
+  mutate(RCP = "RCP60")
+#create table with probabilities in addition to log odds
+
+Biological_Logistic_DF$RCP85_Change<- relevel(Biological_Logistic_DF$RCP85_Change, ref = "Unchanged")
+#make reference unchanged
+
+Bio_RCP85_Change_multinom.fit <- multinom(RCP85_Change ~ Region - 1, data = Biological_Logistic_DF )
+#run multinomial regression
+
+Bio_RCP85_Change_Tidy <-tidy(Bio_RCP85_Change_multinom.fit) %>%
+  mutate(Probability = ((exp(estimate)/(1 + exp(estimate)))))%>%
+    mutate(Region = as.character(gsub("Region", "", term))) %>%
+mutate(RCP = "RCP85")
+#create table with probabilities in addition to log odds
+
+Bio_RCP_Logistic_Results <-
+  rbind(Bio_RCP26_Change_Tidy,Bio_RCP45_Change_Tidy,Bio_RCP60_Change_Tidy,Bio_RCP85_Change_Tidy) %>%
+  dplyr::select(-term) %>%
+  rename(Direction = y.level) 
+#combine results
+
+write.csv(Bio_RCP_Logistic_Results, "C:/Users/antho/OneDrive - The University of Alabama/Niche_Modeling_Rivulus/R code/Maxent_Rivulus_Climate_Change/Bio_Logistic_Results.csv")
+#write results in csv
+```
+
+The following code calculate the percentage in each transition group and the percentage of habitat which increase, decreased, or remained unchanged.
+```{r, Bio Percent-Change}
+Biological_Percentage_Table <- Biological_Logistic_DF %>% 
+  dplyr::select(Region, RCP26_Change, RCP45_Change, RCP60_Change, RCP85_Change) %>%
+  gather(., RCP_Change, Direction, c("RCP26_Change","RCP45_Change", "RCP60_Change", "RCP85_Change"), factor_key = TRUE) %>%
+  mutate(RCP_Change = as.character(gsub("_Change", "", RCP_Change))) %>%
+  mutate(RCP_Change = as.character(gsub("RCP", "", RCP_Change))) %>%
+  mutate(RCP_Change = as.factor(RCP_Change)) %>%
+  group_by(Region, RCP_Change, Direction) %>%
+  summarise(count = n()) %>%
+  drop_na() %>%
+  mutate(Percent = (count/sum(count))*100) %>%
+  mutate_if(is.numeric,round, 2) %>% 
+  mutate(model = "Biological") %>%
+  mutate(Region = factor(Region, levels = c("Northeast", "Northwest", "Central East", "Central West", "South", "Keys")))
+#calculates the percentage of habitat within each transition category 
+
+levels <- levels(as.factor(Biological_Logistic_DF$Current_RCP26))
+#used to get levels from all transitions to force graphs to have all transitions even if they are missing a category
+
+order <- c("medium_high", "low_high", "low_medium", "high_medium", "medium_low", "high_low", "high_high", "medium_medium","low_low")
+#the order of the graphs
+
+Biological_Percentage_Transitions_Table <- Biological_Logistic_DF %>%
+  dplyr::select(Region, Current_RCP26, Current_RCP45, Current_RCP60, Current_RCP85) %>%
+  mutate(Current_RCP26 = factor(Current_RCP26,levels = levels),
+         Current_RCP45 = factor(Current_RCP45,levels = levels),
+         Current_RCP60 = factor(Current_RCP60,levels = levels),
+         Current_RCP85 = factor(Current_RCP85,levels = levels)) %>%
+  gather(.,RCP, Transition, c("Current_RCP26", "Current_RCP45", "Current_RCP60", "Current_RCP85"), factor_key = TRUE) %>%
+   mutate(RCP = as.character(gsub("Current_RCP", "", RCP))) %>%
+  group_by(Region, RCP, Transition) %>%
+  summarise(count = n()) %>%
+  drop_na() %>%
+  mutate(Percent = (count/sum(count))*100) %>%
+  mutate_if(is.numeric,round, 2) %>% 
+  mutate(model = "Biologically Informed")%>%
+  ungroup() %>%
+  mutate(Region = factor(Region, levels = c("Northeast", "Northwest", "Central East", "Central West", "South", "Keys")),
+         Transition = factor(Transition, levels = order),
+         RCP = factor(RCP, levels = c("26", "45", "60", "85"))) %>%
+  arrange(Region, RCP, Transition)
+#calculated the percentage of habitat in each transition group
+
+Biological_Percetage_Graph <- ggplot(Biological_Percentage_Table, aes(x = RCP_Change, fill = Direction, y = Percent ))+
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = c("Red", "Green", "Blue")) +
+  scale_x_discrete(guide = guide_axis(n.dodge = 2))+
+  facet_wrap(.~Region, strip.position = "top", scales = "free_x")+
+  theme(panel.spacing = unit(0, "line"),
+        panel.border = element_rect(color = "black", fill = NA, size = 1),
+        panel.background = element_blank(),
+        strip.placement = "inside",
+        strip.background = element_rect(size = 0.5)) +
+  labs(x = "Representative Concentration Pathway", y = "Pecentage", fill = "Direction of Change")
+#make graph with a standard color pallet of the percent change 
+
+Biological_Pattern_list <- Biological_Percentage_Transitions_Table %>%
+  mutate(Pattern = case_when(Transition == "medium_high" ~ "none",
+                             Transition == "low_high" ~ "stripe",
+                             Transition == "low_medium" ~ "none",
+                             Transition == "high_medium" ~ "crosshatch",
+                             Transition == "medium_low" ~ "none",
+                             Transition == "high_low" ~ "stripe",
+                             Transition == "high_high" ~ "none",
+                             Transition == "medium_medium" ~ "crosshatch",
+                             Transition == "low_low" ~ "circle")) %>%
+  pull(., Pattern)
+#used to get the pattern list for ggpattern
+
+Biological_Angle_list <- Biological_Percentage_Transitions_Table %>%
+  mutate(Angle = case_when(Transition == "medium_high" ~ 0,
+                             Transition == "low_high" ~ 45,
+                             Transition == "low_medium" ~ 0,
+                             Transition == "high_medium" ~ 45,
+                             Transition == "medium_low" ~ 0,
+                             Transition == "high_low" ~ 135,
+                             Transition == "high_high" ~ 0,
+                             Transition == "medium_medium" ~ 90,
+                             Transition == "low_low" ~ 45)) %>%
+  pull(., Angle)
+#used to get the angle list for ggpattern
+  
+Biological_Percetage_Transition_Graph <- ggplot(Biological_Percentage_Transitions_Table, aes(x = RCP, fill = Transition, y = Percent), color = "black") +
+  scale_fill_grey(start = 0, end = .9) +
+   scale_x_discrete(guide = guide_axis(n.dodge = 2)) +
+  labs(x = "Representative Concentration Pathway", y = "Pecentage", fill = "Transition") + 
+  geom_bar_pattern(position="stack",
+                   stat="identity",
+                   pattern = (dput(Biological_Pattern_list)),
+                   pattern_angle  = (dput(Biological_Angle_list)),
+                   pattern_spacing = .02,
+                   pattern_fill = "black",
+                   pattern_density = .2) +
+scale_fill_manual(name = "Transition", 
+                    drop = TRUE, 
+                    labels = c("Medium to High", "Low to High", "Low to Medium", "High to Medium", "Medium to Low", "High to Low", "High to High", "Medium to Medium", "Low to Low"),
+                  values = c("grey1", "white", "grey20", "white", "grey40", "white", "grey60","white", "grey80")) +
+    guides(fill = guide_legend(override.aes = 
+                               list(
+                                 pattern = c("none", "stripe", "none", "crosshatch", "none", "stripe", "none", "crosshatch", "circle"),
+                                 pattern_spacing = .01,
+                                 pattern_angle = c(0, 45, 0, 45, 0, 135, 0, 90, 45)))) +
+ scale_x_discrete(guide = guide_axis(n.dodge = 2))+
+  facet_wrap(.~Region, strip.position = "top", scales = "free_x")+
+  theme(axis.ticks.length=unit(.25, "cm"),
+        panel.spacing.y=unit(.5, "lines"),
+        panel.spacing.x=unit(0, "lines"),
+        panel.border = element_rect(color = "black", fill = NA, size = 1),
+        panel.background = element_blank(),
+        strip.text = element_text(size = 12),
+        strip.placement = "inside",
+        strip.background = element_rect(size = 0.5),
+        axis.text.x= element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        text = element_text(size= 12),
+        legend.title=element_text(size=12),
+        legend.text = element_text(size = 10),
+        legend.key.size = unit(.75, "cm")) +
+  labs(x = "Representative Concentration Pathway", y = "Pecentage", fill = "Transition") 
+#makes a black and white with pattern bar graph of the percentage in each transition category.
+
+
+Biological_Percetage_Transition_Graph_Color <- ggplot(Biological_Percentage_Transitions_Table, aes(x = RCP, fill = Transition, y = Percent), color = "black") +
+  geom_bar(position = "stack", stat="identity") +
+  scale_fill_brewer(palette="Paired",
+                    name = "Transition", 
+                    drop = TRUE, 
+                    labels = c("Medium to High", "Low to High", "Low to Medium", "High to Medium", "Medium to Low", "High to Low", "High to High", "Medium to Medium", "Low to Low")) + 
+   scale_x_discrete(guide = guide_axis(n.dodge = 2),
+                    labels = c("2.6", "4.5", "6.0", "8.5")) +
+  labs(x = "Representative Concentration Pathway", y = "Pecentage", fill = "Transition") + 
+  facet_wrap(.~Region, strip.position = "top", scales = "free_x")+
+  theme(axis.ticks.length=unit(.25, "cm"),
+        panel.spacing.y=unit(.5, "lines"),
+        panel.spacing.x=unit(0, "lines"),
+        panel.border = element_rect(color = "black", fill = NA, size = 1),
+        panel.background = element_blank(),
+        strip.text = element_text(size = 12),
+        strip.placement = "inside",
+        strip.background = element_rect(size = 0.5),
+        text = element_text("serif"),
+        axis.text.x= element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        legend.title=element_text(size=12),
+        legend.text = element_text(size = 10),
+        legend.key.size = unit(.75, "cm"))
+#makes a color-blind friendly graph for all nine transition categories.  
+```
+
+### Pearson
+
+The following code preps data for and runs a multinomial logistic regression on the Pearson variable set. 
+```{r, Pearson Multinominal-Regression}
+Keys <- sf::st_sf(sf::st_sfc((sf::st_polygon(list(Keys = cbind(x = c(-80.233737, -80.088813, -80.182135, -81.191639, -82.421915, -82.025516,
+-81.543536, -81.134018, -80.973724, -80.788178, -80.714619, -80.673021, -80.624591, -80.53566, -80.54115, -80.503821, -80.477075, -80.42038, -80.369877, -80.345193, -80.274359, -80.233737),
+                                        y = c(25.588852, 25.585558, 25.146396, 24.278309, 24.487718, 24.722605, 24.828004, 24.85655, 24.825808, 24.882899, 24.904858, 24.964025, 24.972928, 25.045389, 25.083816, 25.114557, 25.161526, 25.171648, 25.248502, 25.310211, 25.373663, 25.588852
+)))))))
+#makes a keys polygon
+
+ Pearson_Logistic_DF <- as.data.frame(RCP60_AIC_AVG_cloglog_Pearson, xy = TRUE) %>%
+   dplyr::mutate(Scenario = "RCP60") %>%
+   bind_rows(as.data.frame(RCP85_AIC_AVG_cloglog_Pearson, xy = TRUE) %>%
+   dplyr::mutate(Scenario = "RCP85")) %>%
+   bind_rows(as.data.frame(RCP45_AIC_AVG_cloglog_Pearson, xy = TRUE) %>%
+   dplyr::mutate(Scenario = "RCP45")) %>%
+   bind_rows(as.data.frame(RCP26_AIC_AVG_cloglog_Pearson, xy = TRUE) %>%
+   dplyr::mutate(Scenario = "RCP26"))%>%
+   bind_rows(as.data.frame(AIC_AVG_cloglog_Pearson, xy = TRUE) %>%
+   dplyr::mutate(Scenario = "Current")) %>%
+  drop_na() %>%
+   #makes on large data frame with all of the suitability scores for each model
+   sf::st_as_sf(x = ., coords = c("x", "y")) %>%
+   #makes it an sf object
+   cbind(sf::st_coordinates(.)) %>%
+   #binds the coordinates as columns
+   dplyr::rename(x = X, y = Y) %>%
+   #rename the coordinates
+  sf::st_join(Keys, .) %>%
+   #get only rows that intersect with the keys
+   sf::st_drop_geometry(.) %>%
+   #drop the geometry to make it a data frame again
+   dplyr::mutate(Region = "Keys") %>%
+   #give all points left a new column filled with Keys as the region
+   bind_rows(as.data.frame(RCP60_AIC_AVG_cloglog_Pearson, xy = TRUE) %>%
+   dplyr::mutate(Scenario = "RCP60",
+                 Region = NA)) %>%
+   bind_rows(as.data.frame(RCP85_AIC_AVG_cloglog_Pearson, xy = TRUE) %>%
+   dplyr::mutate(Scenario = "RCP85",
+                 Region = NA)) %>%
+   bind_rows(as.data.frame(RCP45_AIC_AVG_cloglog_Pearson, xy = TRUE) %>%
+   dplyr::mutate(Scenario = "RCP45",
+                 Region = NA)) %>%
+   bind_rows(as.data.frame(RCP26_AIC_AVG_cloglog_Pearson, xy = TRUE) %>%
+   dplyr::mutate(Scenario = "RCP26",
+                 Region = NA)) %>%
+   bind_rows(as.data.frame(AIC_AVG_cloglog_Pearson, xy = TRUE) %>%
+   dplyr::mutate(Scenario = "Current",
+                 Region = NA)) %>%
+   #bind rows again to get the other regions
+   dplyr::rename(Suitibility = layer) %>%
+   #rename the layer
+   dplyr::mutate(x = round(x,2),
+                 y = round(y,2)) %>%
+   #round to 2 decimal places because we have 1 km resolution and extents can be slightly off
+   distinct(x,y, Scenario, .keep_all = TRUE) %>%
+   #keep only distinct rows
+  mutate(Region = case_when(Region == "Keys" ~ "Keys",
+                            y >= 28.5 & x <= -82 ~ "Northwest",
+                            y >= 28.5 & x > -82 ~ "Northeast",
+                            y < 28.5 & y >= 26.5 & x <= -81.5  ~ "Central West",
+                            y < 28.5 & y >= 26.5 & x > -81.5  ~ "Central East",
+                            y < 26.5 & is.na(Region) ~ "South")) %>%
+   #fill region with the correct area
+   drop_na() %>%
+   #drop any NAs that do not meet the criteria
+   tidyr::pivot_wider(names_from = Scenario, values_from = Suitibility) %>%
+   #make into wide
+   drop_na() %>%
+   #drop missing values
+  mutate(Current_Classification = case_when(Current < .25 ~ "low",
+                                            Current >= .25 & Current < .5 ~ "medium",
+                                            Current >= .5 ~"high"),
+         RCP26_Classification = case_when(RCP26 < .25 ~ "low",
+                                            RCP26 >= .25 & RCP26 < .5 ~ "medium",
+                                            RCP26 >= .5 ~"high"),
+         RCP45_Classification = case_when(RCP45 < .25 ~ "low",
+                                            RCP45 >= .25 & RCP45 < .5 ~ "medium",
+                                            RCP45 >= .5 ~"high"),
+         RCP60_Classification = case_when(RCP60 < .25 ~ "low",
+                                            RCP60 >= .25 & RCP60 < .5 ~ "medium",
+                                            RCP60 >= .5 ~"high"),
+         RCP85_Classification = case_when(RCP85 < .25 ~ "low",
+                                            RCP85 >= .25 & RCP85 < .5 ~ "medium",
+                                            RCP85 >= .5 ~"high")) %>%
+#the above code classifies the current and each RCP as low, medium, or high
+  unite("Current_RCP26", c("Current_Classification", "RCP26_Classification"), sep = "_", remove = FALSE) %>%
+  unite("Current_RCP45", c("Current_Classification", "RCP45_Classification"), sep = "_", remove = FALSE) %>%
+  unite("Current_RCP60", c("Current_Classification", "RCP60_Classification"), sep = "_", remove = FALSE) %>%
+  unite("Current_RCP85", c("Current_Classification", "RCP85_Classification"), sep = "_", remove = FALSE) %>%
+#this creates a new column with both classification for current and each RCP
+   mutate_at(c("Region", "Current_RCP26", "Current_RCP45", "Current_RCP60", "Current_RCP85" ), funs(factor(.))) %>%
+  mutate(RCP26_Change = case_when(Current_RCP26 == "low_low" | Current_RCP26 == "medium_medium" | Current_RCP26 == "high_high" ~ "Unchanged",
+                                  Current_RCP26 == "low_medium" | Current_RCP26 == "low_high" | Current_RCP26 =="medium_high" ~ "Increased",
+                                  Current_RCP26 == "medium_low" | Current_RCP26 == "high_low" |Current_RCP26 == "high_medium" ~ "Decreased")) %>%
+    mutate(RCP45_Change = case_when(Current_RCP45 == "low_low" | Current_RCP45 == "medium_medium" | Current_RCP45 == "high_high" ~ "Unchanged",
+                                  Current_RCP45 == "low_medium" | Current_RCP45 == "low_high" | Current_RCP45 =="medium_high" ~ "Increased",
+                                  Current_RCP45 == "medium_low" | Current_RCP45 == "high_low" |Current_RCP45 == "high_medium" ~ "Decreased")) %>%
+    mutate(RCP60_Change = case_when(Current_RCP60 == "low_low" | Current_RCP60 == "medium_medium" | Current_RCP60 == "high_high" ~ "Unchanged",
+                                  Current_RCP60 == "low_medium" | Current_RCP60 == "low_high" | Current_RCP60 =="medium_high" ~ "Increased",
+                                  Current_RCP60 == "medium_low" | Current_RCP60 == "high_low" |Current_RCP60 == "high_medium" ~ "Decreased")) %>%
+    mutate(RCP85_Change = case_when(Current_RCP85 == "low_low" | Current_RCP85 == "medium_medium" | Current_RCP85 == "high_high" ~ "Unchanged",
+                                  Current_RCP85 == "low_medium" | Current_RCP85 == "low_high" | Current_RCP85 =="medium_high" ~ "Increased",
+                                  Current_RCP85 == "medium_low" | Current_RCP85 == "high_low" |Current_RCP85 == "high_medium" ~ "Decreased")) %>%
+#this classifies each category as increased, decreasing, or unchanged
+   mutate_at(c("RCP26_Change", "RCP45_Change", "RCP60_Change", "RCP85_Change" ), funs(factor(.)))
+#this just makes each column a factor for the multinomial regression. 
+
+
+Pearson_Logistic_DF$RCP26_Change<- relevel(Pearson_Logistic_DF$RCP26_Change, ref = "Unchanged")
+#make reference unchanged
+
+P_RCP26_Change_multinom.fit <- multinom(RCP26_Change ~ Region - 1, data = Pearson_Logistic_DF )
+#run multinomial regression
+
+P_RCP26_Change_Tidy <-tidy(P_RCP26_Change_multinom.fit) %>%
+  mutate(Probability = ((exp(estimate)/(1 + exp(estimate)))))%>%
+    mutate(Region = as.character(gsub("Region", "", term))) %>%
+  mutate(RCP = "RCP26")
+#create table with probabilities in addition to log odds
+
+Pearson_Logistic_DF$RCP45_Change<- relevel(Pearson_Logistic_DF$RCP45_Change, ref = "Unchanged")
+#make reference unchanged
+
+P_RCP45_Change_multinom.fit <- multinom(RCP45_Change ~ Region - 1, data = Pearson_Logistic_DF )
+#run multinomial regression
+
+P_RCP45_Change_Tidy <-tidy(P_RCP45_Change_multinom.fit) %>%
+  mutate(Probability = ((exp(estimate)/(1 + exp(estimate))))) %>%
+    mutate(Region = as.character(gsub("Region", "", term))) %>%
+  mutate(RCP = "RCP45")
+#create table with probabilities in addition to log odds
+
+Pearson_Logistic_DF$RCP60_Change<- relevel(Pearson_Logistic_DF$RCP60_Change, ref = "Unchanged")
+#make reference unchanged
+
+P_RCP60_Change_multinom.fit <- multinom(RCP60_Change ~ Region - 1, data = Pearson_Logistic_DF )
+#run multinomial regression
+
+P_RCP60_Change_Tidy <-tidy(P_RCP60_Change_multinom.fit) %>%
+  mutate(Probability = ((exp(estimate)/(1 + exp(estimate)))))%>%
+    mutate(Region = as.character(gsub("Region", "", term))) %>%
+  mutate(RCP = "RCP60")
+#create table with probabilities in addition to log odds
+
+Pearson_Logistic_DF$RCP85_Change<- relevel(Pearson_Logistic_DF$RCP85_Change, ref = "Unchanged")
+#make reference unchanged
+
+P_RCP85_Change_multinom.fit <- multinom(RCP85_Change ~ Region - 1, data = Pearson_Logistic_DF )
+#run multinomial regression
+
+P_RCP85_Change_Tidy <-tidy(P_RCP85_Change_multinom.fit) %>%
+  mutate(Probability = ((exp(estimate)/(1 + exp(estimate))))) %>%
+    mutate(Region = as.character(gsub("Region", "", term))) %>%
+  mutate(RCP = "RCP85")
+#create table with probabilities in addition to log odds
+
+Pearson_RCP_Logistic_Results <-
+  rbind(P_RCP26_Change_Tidy,P_RCP45_Change_Tidy,P_RCP60_Change_Tidy,P_RCP85_Change_Tidy)%>%
+  dplyr::select(-term) %>%
+  rename(Direction = y.level) 
+#combine results
+
+write.csv(Pearson_RCP_Logistic_Results, "C:/Users/antho/OneDrive - The University of Alabama/Niche_Modeling_Rivulus/R code/Maxent_Rivulus_Climate_Change/Pearson_Logistic_Results.csv")
+#write results to csv
+```
+
+The following code calculate the percentage in each transition group and the percentage of habitat which increase, decreased, or remained unchanged.
+```{r, Pearson Percent-Change}
+Pearson_Percentage_Table <- Pearson_Logistic_DF %>% 
+  dplyr::select(Region, RCP26_Change, RCP45_Change, RCP60_Change, RCP85_Change) %>%
+  gather(., RCP_Change, Direction, c("RCP26_Change","RCP45_Change", "RCP60_Change", "RCP85_Change"), factor_key = TRUE) %>%
+  mutate(RCP_Change = as.character(gsub("_Change", "", RCP_Change))) %>%
+  mutate(RCP_Change = as.character(gsub("RCP", "", RCP_Change))) %>%
+  mutate(RCP_Change = as.factor(RCP_Change)) %>%
+  group_by(Region, RCP_Change, Direction) %>%
+  summarise(count = n()) %>%
+  drop_na() %>%
+  mutate(Percent = (count/sum(count))*100) %>%
+  mutate_if(is.numeric,round, 2) %>% 
+  mutate(model = "Pearson") %>%
+  mutate(Region = factor(Region, levels = c("Northeast", "Northwest", "Central East", "Central West", "South", "Keys")))
+
+
+Pearson_Percentage_Transitions_Table <- Pearson_Logistic_DF %>%
+  dplyr::select(Region, Current_RCP26, Current_RCP45, Current_RCP60, Current_RCP85) %>%
+    mutate(Current_RCP26 = factor(Current_RCP26,levels = levels),
+         Current_RCP45 = factor(Current_RCP45,levels = levels),
+         Current_RCP60 = factor(Current_RCP60,levels = levels),
+         Current_RCP85 = factor(Current_RCP85,levels = levels)) %>%
+  gather(.,RCP, Transition, c("Current_RCP26", "Current_RCP45", "Current_RCP60", "Current_RCP85"), factor_key = TRUE) %>%
+   mutate(RCP = as.character(gsub("Current_RCP", "", RCP))) %>%
+  group_by(Region, RCP, Transition) %>%
+  summarise(count = n()) %>%
+  mutate(Percent = (count/sum(count))*100) %>%
+  mutate_if(is.numeric,round, 2) %>% 
+  mutate(model = "Pearson")%>%
+  ungroup() %>%
+  mutate(Region = factor(Region, levels = c("Northeast", "Northwest", "Central East", "Central West", "South", "Keys")),
+         Transition = factor(Transition, levels = order),
+         RCP = factor(RCP, levels = c("26", "45", "60", "85"))) %>%
+  arrange(Region, RCP, Transition)
+
+Pearson_Percetage_Graph <-  ggplot(Pearson_Percentage_Table, aes(x = RCP_Change, fill = Direction, y = Percent ))+
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = c("Red", "Green", "Blue")) +
+  scale_x_discrete(guide = guide_axis(n.dodge = 2))+
+  facet_wrap(.~Region, strip.position = "top", scales = "free_x")+
+  theme(panel.spacing = unit(0, "line"),
+        panel.border = element_rect(color = "black", fill = NA, size = 1),
+        panel.background = element_blank(),
+        strip.placement = "inside",
+        strip.background = element_rect(size = 0.5)) +
+  labs(x = "Representative Concentration Pathway", y = "Pecentage", fill = "Direction of Change")
+#make graph with a standard color pallet of the percent change
+
+Pearson_Pattern_list <- Pearson_Percentage_Transitions_Table %>%
+  mutate(Pattern = case_when(Transition == "medium_high" ~ "none",
+                             Transition == "low_high" ~ "stripe",
+                             Transition == "low_medium" ~ "none",
+                             Transition == "high_medium" ~ "crosshatch",
+                             Transition == "medium_low" ~ "none",
+                             Transition == "high_low" ~ "stripe",
+                             Transition == "high_high" ~ "none",
+                             Transition == "medium_medium" ~ "crosshatch",
+                             Transition == "low_low" ~ "circle")) %>%
+  pull(., Pattern)
+#create pattern list for ggpattern
+
+Pearson_Angle_list <- Pearson_Percentage_Transitions_Table %>%
+  mutate(Angle = case_when(Transition == "medium_high" ~ 0,
+                             Transition == "low_high" ~ 45,
+                             Transition == "low_medium" ~ 0,
+                             Transition == "high_medium" ~ 45,
+                             Transition == "medium_low" ~ 0,
+                             Transition == "high_low" ~ 135,
+                             Transition == "high_high" ~ 0,
+                             Transition == "medium_medium" ~ 90,
+                             Transition == "low_low" ~ 45)) %>%
+  pull(., Angle)
+#creates angle list for ggpattern
+
+Pearson_Percetage_Transition_Graph <-  ggplot(Pearson_Percentage_Transitions_Table, aes(x = RCP, fill = Transition, y = Percent), color = "black") +
+  scale_fill_grey(start = 0, end = .9) +
+   scale_x_discrete(guide = guide_axis(n.dodge = 2)) +
+  labs(x = "Representative Concentration Pathway", y = "Pecentage", fill = "Transition") + 
+  geom_bar_pattern(position="stack",
+                   stat="identity",
+                   pattern = (dput(Pearson_Pattern_list)),
+                   pattern_angle  = (dput(Pearson_Angle_list)),
+                   pattern_spacing = .02,
+                   pattern_fill = "black",
+                   pattern_density = .2) +
+scale_fill_manual(name = "Transition", 
+                    drop = FALSE, 
+                    labels = c("Medium to High", "Low to High", "Low to Medium", "High to Medium", "Medium to Low", "High to Low", "High to High", "Medium to Medium", "Low to Low"),
+                  values = c("grey1", "white", "grey20", "white", "grey40", "white", "grey60","white", "grey80")) +
+    guides(fill = guide_legend(override.aes = 
+                               list(
+                                 pattern = c("none", "stripe", "none", "crosshatch", "none", "stripe", "none", "crosshatch", "circle"),
+                                 pattern_spacing = .01,
+                                 pattern_angle = c(0, 45, 0, 45, 0, 135, 0, 90, 45)))) +
+ scale_x_discrete(guide = guide_axis(n.dodge = 2))+
+  facet_wrap(.~Region, strip.position = "top", scales = "free_x")+
+  theme(axis.ticks.length=unit(.25, "cm"),
+        panel.spacing.y=unit(.5, "lines"),
+        panel.spacing.x=unit(0, "lines"),
+        panel.border = element_rect(color = "black", fill = NA, size = 1),
+        panel.background = element_blank(),
+        strip.text = element_text(size = 12),
+        strip.placement = "inside",
+        strip.background = element_rect(size = 0.5),
+        axis.text.x= element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        text = element_text(size= 12),
+        legend.title=element_text(size=12),
+        legend.text = element_text(size = 10),
+        legend.key.size = unit(.75, "cm")) +
+  labs(x = "Representative Concentration Pathway", y = "Pecentage", fill = "Transition") 
+#makes a black, white, and pattern graph for all nine transition categories. 
+
+Pearson_Percetage_Transition_Graph_Color <- ggplot(Pearson_Percentage_Transitions_Table, aes(x = RCP, fill = Transition, y = Percent), color = "black") +
+  geom_bar(position = "stack", stat="identity") +
+  scale_fill_brewer(palette="Paired",
+                    name = "Transition", 
+                    drop = TRUE, 
+                    labels = c("Medium to High", "Low to High", "Low to Medium", "High to Medium", "Medium to Low", "High to Low", "High to High", "Medium to Medium", "Low to Low")) + 
+   scale_x_discrete(guide = guide_axis(n.dodge = 2),
+                    labels = c("2.6", "4.5", "6.0", "8.5")) +
+  labs(x = "Representative Concentration Pathway", y = "Pecentage", fill = "Transition") + 
+  facet_wrap(.~Region, strip.position = "top", scales = "free_x")+
+  theme(axis.ticks.length=unit(.25, "cm"),
+        panel.spacing.y=unit(.5, "lines"),
+        panel.spacing.x=unit(0, "lines"),
+        panel.border = element_rect(color = "black", fill = NA, size = 1),
+        panel.background = element_blank(),
+        strip.text = element_text(size = 12),
+        strip.placement = "inside",
+        strip.background = element_rect(size = 0.5),
+        text = element_text("serif"),
+        axis.text.x= element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        legend.title=element_text(size=12),
+        legend.text = element_text(size = 10),
+        legend.key.size = unit(.75, "cm"))
+#makes a color-blind friendly graph for all nine transition categories. 
+```
+
+### Graphs
+
+The following code chunks are use to combine graphs using cowplot. All graphs where exported as PDFs to be further edited in adobe. Adobe was used for fine tuning of graphics.
+
+```{r, Combined Percent-Change}
+
+Percent_legend <- get_legend(Biological_Percetage_Graph +
+                               theme_cowplot(font_size = 14) +
+                               theme(legend.box.margin = margin(0,12,0,12)))
+#make the legend 
+
+Percent_Graph_Combined <- plot_grid(Biological_Percetage_Graph + theme(legend.position = "none"),
+                               Pearson_Percetage_Graph + theme(axis.text.y = element_blank(),
+                                                                         axis.ticks.y = element_blank(),
+                                                                         axis.title.y = element_blank(),
+                                                                         legend.position = "none"),
+                               align = "h")
+#make the combined graph
+Percent_Graph_Combined <- plot_grid(Percent_Graph_Combined, Percent_legend, rel_widths = c(3,.8))
+#combine the graphs and legend into one figure
+
+Transition_legend <- get_legend(Biological_Percetage_Transition_Graph +
+                            theme(legend.box.margin = margin(0,0,0,6)))
+#make the legend 
+
+Transition_Graph_Combined <- plot_grid(Biological_Percetage_Transition_Graph + theme(legend.position = "none"),
+                               Pearson_Percetage_Transition_Graph + theme(axis.text.y = element_blank(),
+                                                                         axis.ticks.y = element_blank(),
+                                                                         axis.title.y = element_blank(),
+                                                                         legend.position = "none"),
+                               align = "h")
+#make the combined graph
+
+Transition_Graph_Combined <- plot_grid(Transition_Graph_Combined, Transition_legend, rel_widths = c(3,.8)) +
+  theme(plot.margin = margin(60,0,30,30))
+#combine the graphs and legend into one figure
+
+
+Transition_legend_Color <- get_legend(Biological_Percetage_Transition_Graph_Color +
+                            theme(legend.box.margin = margin(0,0,0,6)))
+#make the legend 
+
+Transition_Graph_Color_Combined <- plot_grid(Biological_Percetage_Transition_Graph_Color + theme(legend.position = "none"),
+                               Pearson_Percetage_Transition_Graph_Color + theme(axis.text.y = element_blank(),
+                                                                         axis.ticks.y = element_blank(),
+                                                                         axis.title.y = element_blank(),
+                                                                         legend.position = "none"),
+                               align = "h")
+#make the combined graph
+
+Transition_Graph_Color_Combined <- plot_grid(Transition_Graph_Color_Combined, Transition_legend_Color, rel_widths = c(3,.8)) +
+  theme(plot.margin = margin(60,0,30,30))
+#combine the graphs and legend into one figure
+
+```
+## Response curves
+
+The following code extracts response curves for all models and all variables.
+
+### Biologically informed
+
+```{r, Bio Response-Curve-Extraction}
+AIC1_Biological_Precip_Wettest_Q <- (as.data.frame(dismo::response(AIC1_bio, "P_We_Q", expand = 70))) %>%
+  rename(Precipitation_of_the_Wettest_Quarter = V1, P_B1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Biological_Precip_Wettest_Q <- (as.data.frame(dismo::response(AIC2_bio, "P_We_Q", expand = 70))) %>%
+  rename(Precipitation_of_the_Wettest_Quarter = V1, P_B2 = p)
+#extracts the raw data from the response curve
+
+AUC_Biological_Precip_Wettest_Q <- (as.data.frame(dismo::response(AUC_bio, "P_We_Q", expand = 70))) %>%
+  rename(Precipitation_of_the_Wettest_Quarter = V1, P_AUC = p)
+#extracts the raw data from the response curve
+
+OR10_Biological_Precip_Wettest_Q <- (as.data.frame(dismo::response(OR10_bio, "P_We_Q", expand = 70))) %>%
+rename(Precipitation_of_the_Wettest_Quarter = V1, P_OR10 = p)
+#extracts the raw data from the response curve
+
+AIC1_Biological_Precip_C_Q <- (as.data.frame(dismo::response(AIC1_bio, "P_C_Q"))) %>%
+  rename(Precipitation_of_the_Coldest_Quarter = V1, P_B1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Biological_Precip_C_Q <- (as.data.frame(dismo::response(AIC2_bio, "P_C_Q"))) %>%
+  rename(Precipitation_of_the_Coldest_Quarter = V1, P_B2 = p)
+#extracts the raw data from the response curve
+
+AUC_Biological_Precip_C_Q <- (as.data.frame(dismo::response(AUC_bio, "P_C_Q"))) %>%
+  rename(Precipitation_of_the_Coldest_Quarter = V1, P_AUC = p)
+#extracts the raw data from the response curve
+
+OR10_Biological_Precip_C_Q <- (as.data.frame(dismo::response(OR10_bio, "P_C_Q"))) %>%
+  rename(Precipitation_of_the_Coldest_Quarter = V1, P_OR10 = p)
+#extracts the raw data from the response curve
+
+AIC1_Biological_Precip_D_Q <- (as.data.frame(dismo::response(AIC1_bio, "P_D_Q"))) %>%
+  rename(Precipitation_of_the_Driest_Quarter = V1, P_B1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Biological_Precip_D_Q <- (as.data.frame(dismo::response(AIC2_bio, "P_D_Q"))) %>%
+  rename(Precipitation_of_the_Driest_Quarter = V1, P_B2 = p)
+#extracts the raw data from the response curve
+
+AUC_Biological_Precip_D_Q <- (as.data.frame(dismo::response(AUC_bio, "P_D_Q"))) %>%
+  rename(Precipitation_of_the_Driest_Quarter = V1, P_AUC = p)
+#extracts the raw data from the response curve
+
+OR10_Biological_Precip_D_Q <- (as.data.frame(dismo::response(OR10_bio, "P_D_Q"))) %>%
+  rename(Precipitation_of_the_Driest_Quarter = V1, P_OR10 = p)
+#extracts the raw data from the response curve
+
+AIC1_Biological_SSS_S_M <- (as.data.frame(dismo::response(AIC1_bio, "SSS_S_M"))) %>%
+  rename(Sea_Surface_Salinity_of_the_Saltiest_Month = V1, P_B1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Biological_SSS_S_M  <- (as.data.frame(dismo::response(AIC2_bio, "SSS_S_M"))) %>%
+  rename(Sea_Surface_Salinity_of_the_Saltiest_Month = V1, P_B2 = p)
+#extracts the raw data from the response curve
+
+AUC_Biological_SSS_S_M  <- (as.data.frame(dismo::response(AUC_bio, "SSS_S_M"))) %>%
+  rename(Sea_Surface_Salinity_of_the_Saltiest_Month = V1, P_AUC = p)
+#extracts the raw data from the response curve
+
+OR10_Biological_SSS_S_M  <- (as.data.frame(dismo::response(OR10_bio, "SSS_S_M"))) %>%
+  rename(Sea_Surface_Salinity_of_the_Saltiest_Month = V1, P_OR10 = p)
+#extracts the raw data from the response curve
+
+AIC1_Biological_Isotherm <- (as.data.frame(dismo::response(AIC1_bio, "Isotherm"))) %>%
+  rename(Isothermality = V1, P_B1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Biological_Isotherm  <- (as.data.frame(dismo::response(AIC2_bio, "Isotherm"))) %>%
+  rename(Isothermality = V1, P_B2 = p)
+#extracts the raw data from the response curve
+
+AUC_Biological_Isotherm  <- (as.data.frame(dismo::response(AUC_bio, "Isotherm"))) %>%
+  rename(Isothermality = V1, P_AUC = p)
+#extracts the raw data from the response curve
+
+OR10_Biological_Isotherm  <- (as.data.frame(dismo::response(OR10_bio, "Isotherm"))) %>%
+  rename(Isothermality = V1, P_OR10 = p)
+#extracts the raw data from the response curve
+
+AIC1_Biological_Mean_D_R <- (as.data.frame(dismo::response(AIC1_bio, "Mean_D_R"))) %>%
+  rename(Mean_Diurnal_Range = V1, P_B1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Biological_Mean_D_R  <- (as.data.frame(dismo::response(AIC2_bio, "Mean_D_R"))) %>%
+  rename(Mean_Diurnal_Range = V1, P_B2 = p)
+#extracts the raw data from the response curve
+
+AUC_Biological_Mean_D_R  <- (as.data.frame(dismo::response(AUC_bio, "Mean_D_R"))) %>%
+  rename(Mean_Diurnal_Range = V1, P_AUC = p)
+#extracts the raw data from the response curve
+
+OR10_Biological_Mean_D_R  <- (as.data.frame(dismo::response(OR10_bio, "Mean_D_R"))) %>%
+  rename(Mean_Diurnal_Range = V1, P_OR10 = p)
+#extracts the raw data from the response curve
+
+AIC1_Biological_Avg_T_Wa_Q <- (as.data.frame(dismo::response(AIC1_bio, "Avg_T_Wa_Q"))) %>%
+  rename(Mean_Temperature_of_the_Warmest_Quarter = V1, P_B1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Biological_Avg_T_Wa_Q  <- (as.data.frame(dismo::response(AIC2_bio, "Avg_T_Wa_Q"))) %>%
+  rename(Mean_Temperature_of_the_Warmest_Quarter = V1, P_B2 = p)
+#extracts the raw data from the response curve
+
+AUC_Biological_Avg_T_Wa_Q  <- (as.data.frame(dismo::response(AUC_bio, "Avg_T_Wa_Q"))) %>%
+  rename(Mean_Temperature_of_the_Warmest_Quarter = V1, P_AUC = p)
+#extracts the raw data from the response curve
+
+OR10_Biological_Avg_T_Wa_Q  <- (as.data.frame(dismo::response(OR10_bio, "Avg_T_Wa_Q"))) %>%
+  rename(Mean_Temperature_of_the_Warmest_Quarter = V1, P_OR10 = p)
+#extracts the raw data from the response curve
+
+AIC1_Biological_P_Wa_Q <- (as.data.frame(dismo::response(AIC1_bio, "P_Wa_Q"))) %>%
+  rename(Precipitation_of_the_Warmest_Quarter = V1, P_B1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Biological_P_Wa_Q  <- (as.data.frame(dismo::response(AIC2_bio, "P_Wa_Q"))) %>%
+  rename(Precipitation_of_the_Warmest_Quarter = V1, P_B2 = p)
+#extracts the raw data from the response curve
+
+AUC_Biological_P_Wa_Q  <- (as.data.frame(dismo::response(AUC_bio, "P_Wa_Q"))) %>%
+  rename(Precipitation_of_the_Warmest_Quarter = V1, P_AUC = p)
+#extracts the raw data from the response curve
+
+OR10_Biological_P_Wa_Q  <- (as.data.frame(dismo::response(OR10_bio, "P_Wa_Q"))) %>%
+  rename(Precipitation_of_the_Warmest_Quarter = V1, P_OR10 = p)
+#extracts the raw data from the response curve
+
+AIC1_Biological_SSS_F_M <- (as.data.frame(dismo::response(AIC1_bio, "SSS_F_M"))) %>%
+  rename(Sea_Surface_Salinity_of_the_Freshest_Month = V1, P_B1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Biological_SSS_F_M  <- (as.data.frame(dismo::response(AIC2_bio, "SSS_F_M"))) %>%
+  rename(Sea_Surface_Salinity_of_the_Freshest_Month = V1, P_B2 = p)
+#extracts the raw data from the response curve
+
+AUC_Biological_SSS_F_M  <- (as.data.frame(dismo::response(AUC_bio, "SSS_F_M"))) %>%
+  rename(Sea_Surface_Salinity_of_the_Freshest_Month = V1, P_AUC = p)
+#extracts the raw data from the response curve
+
+OR10_Biological_SSS_F_M  <- (as.data.frame(dismo::response(OR10_bio, "SSS_F_M"))) %>%
+  rename(Sea_Surface_Salinity_of_the_Freshest_Month = V1, P_OR10 = p)
+#extracts the raw data from the response curve
+
+AIC1_Biological_Avg_T_We_Q <- (as.data.frame(dismo::response(AIC1_bio, "Avg_T_We_Q"))) %>%
+  rename(Mean_Temperature_of_the_Wettest_Quarter = V1, P_B1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Biological_Avg_T_We_Q  <- (as.data.frame(dismo::response(AIC2_bio, "Avg_T_We_Q"))) %>%
+  rename(Mean_Temperature_of_the_Wettest_Quarter = V1, P_B2 = p)
+#extracts the raw data from the response curve
+
+AUC_Biological_Avg_T_We_Q  <- (as.data.frame(dismo::response(AUC_bio, "Avg_T_We_Q"))) %>%
+  rename(Mean_Temperature_of_the_Wettest_Quarter = V1, P_AUC = p)
+#extracts the raw data from the response curve
+
+OR10_Biological_Avg_T_We_Q  <- (as.data.frame(dismo::response(OR10_bio, "Avg_T_We_Q"))) %>%
+  rename(Mean_Temperature_of_the_Wettest_Quarter = V1, P_OR10 = p)
+#extracts the raw data from the response curve
+
+AIC1_Biological_P_We_M <- (as.data.frame(dismo::response(AIC1_bio, "P_We_M"))) %>%
+  rename(Precipitation_of_the_Wettest_Month = V1, P_B1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Biological_P_We_M  <- (as.data.frame(dismo::response(AIC2_bio, "P_We_M"))) %>%
+  rename(Precipitation_of_the_Wettest_Month = V1, P_B2 = p)
+#extracts the raw data from the response curve
+
+AUC_Biological_P_We_M  <- (as.data.frame(dismo::response(AUC_bio, "P_We_M"))) %>%
+  rename(Precipitation_of_the_Wettest_Month = V1, P_AUC = p)
+#extracts the raw data from the response curve
+
+OR10_Biological_P_We_M  <- (as.data.frame(dismo::response(OR10_bio, "P_We_M"))) %>%
+  rename(Precipitation_of_the_Wettest_Month = V1, P_OR10 = p)
+#extracts the raw data from the response curve
+
+AIC1_Biological_Annual_P <- (as.data.frame(dismo::response(AIC1_bio, "Annual_P"))) %>%
+  rename(Annual_Precipitation = V1, P_B1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Biological_Annual_P  <- (as.data.frame(dismo::response(AIC2_bio, "Annual_P"))) %>%
+  rename(Annual_Precipitation = V1, P_B2 = p)
+#extracts the raw data from the response curve
+
+AUC_Biological_Annual_P  <- (as.data.frame(dismo::response(AUC_bio, "Annual_P"))) %>%
+  rename(Annual_Precipitation = V1, P_AUC = p)
+#extracts the raw data from the response curve
+
+OR10_Biological_Annual_P  <- (as.data.frame(dismo::response(OR10_bio, "Annual_P"))) %>%
+  rename(Annual_Precipitation = V1, P_OR10 = p)
+#extracts the raw data from the response curve
+
+AIC1_Biological_SST_C_M <- (as.data.frame(dismo::response(AIC1_bio, "SST_C_M"))) %>%
+  rename(Sea_Surface_Temperature_of_the_Coldest_Month = V1, P_B1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Biological_SST_C_M  <- (as.data.frame(dismo::response(AIC2_bio, "SST_C_M"))) %>%
+  rename(Sea_Surface_Temperature_of_the_Coldest_Month = V1, P_B2 = p)
+#extracts the raw data from the response curve
+
+AUC_Biological_SST_C_M  <- (as.data.frame(dismo::response(AUC_bio, "SST_C_M"))) %>%
+  rename(Sea_Surface_Temperature_of_the_Coldest_Month = V1, P_AUC = p)
+#extracts the raw data from the response curve
+
+OR10_Biological_SST_C_M  <- (as.data.frame(dismo::response(OR10_bio, "SST_C_M"))) %>%
+  rename(Sea_Surface_Temperature_of_the_Coldest_Month = V1, P_OR10 = p)
+#extracts the raw data from the response curve
+
+AIC1_Biological_SST_Wa_M <- (as.data.frame(dismo::response(AIC1_bio, "SST_Wa_M"))) %>%
+  rename(Sea_Surface_Temperature_of_the_Warmest_Month = V1, P_B1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Biological_SST_Wa_M  <- (as.data.frame(dismo::response(AIC2_bio, "SST_Wa_M"))) %>%
+  rename(Sea_Surface_Temperature_of_the_Warmest_Month = V1, P_B2 = p)
+#extracts the raw data from the response curve
+
+AUC_Biological_SST_Wa_M  <- (as.data.frame(dismo::response(AUC_bio, "SST_Wa_M"))) %>%
+  rename(Sea_Surface_Temperature_of_the_Warmest_Month = V1, P_AUC = p)
+#extracts the raw data from the response curve
+
+OR10_Biological_SST_Wa_M  <- (as.data.frame(dismo::response(OR10_bio, "SST_Wa_M"))) %>%
+  rename(Sea_Surface_Temperature_of_the_Warmest_Month = V1, P_OR10 = p)
+#extracts the raw data from the response curve
+
+AIC1_Biological_Avg_T_C_Q <- (as.data.frame(dismo::response(AIC1_bio, "Avg_T_C_Q"))) %>%
+  rename(Mean_Temperature_of_the_Coldest_Quarter = V1, P_B1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Biological_Avg_T_C_Q  <- (as.data.frame(dismo::response(AIC2_bio, "Avg_T_C_Q"))) %>%
+  rename(Mean_Temperature_of_the_Coldest_Quarter = V1, P_B2 = p)
+#extracts the raw data from the response curve
+
+AUC_Biological_Avg_T_C_Q  <- (as.data.frame(dismo::response(AUC_bio, "Avg_T_C_Q"))) %>%
+  rename(Mean_Temperature_of_the_Coldest_Quarter = V1, P_AUC = p)
+#extracts the raw data from the response curve
+
+OR10_Biological_Avg_T_C_Q  <- (as.data.frame(dismo::response(OR10_bio, "Avg_T_C_Q"))) %>%
+  rename(Mean_Temperature_of_the_Coldest_Quarter = V1, P_OR10 = p)
+#extracts the raw data from the response curve
+
+AIC1_Biological_Max_T_Wa_M <- (as.data.frame(dismo::response(AIC1_bio, "Max_T_Wa_M"))) %>%
+  rename(Maximum_Temperature_of_the_Warmest_Month = V1, P_B1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Biological_Max_T_Wa_M  <- (as.data.frame(dismo::response(AIC2_bio, "Max_T_Wa_M"))) %>%
+  rename(Maximum_Temperature_of_the_Warmest_Month = V1, P_B2 = p)
+#extracts the raw data from the response curve
+
+AUC_Biological_Max_T_Wa_M  <- (as.data.frame(dismo::response(AUC_bio, "Max_T_Wa_M"))) %>%
+  rename(Maximum_Temperature_of_the_Warmest_Month = V1, P_AUC = p)
+#extracts the raw data from the response curve
+
+OR10_Biological_Max_T_Wa_M  <- (as.data.frame(dismo::response(OR10_bio, "Max_T_Wa_M"))) %>%
+  rename(Maximum_Temperature_of_the_Warmest_Month = V1, P_OR10 = p)
+#extracts the raw data from the response curve
+
+AIC1_Biological_Avg_T_D_Q <- (as.data.frame(dismo::response(AIC1_bio, "Avg_T_D_Q"))) %>%
+  rename(Mean_Temperature_of_the_Driest_Quarter = V1, P_B1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Biological_Avg_T_D_Q  <- (as.data.frame(dismo::response(AIC2_bio, "Avg_T_D_Q"))) %>%
+  rename(Mean_Temperature_of_the_Driest_Quarter = V1, P_B2 = p)
+#extracts the raw data from the response curve
+
+AUC_Biological_Avg_T_D_Q  <- (as.data.frame(dismo::response(AUC_bio, "Avg_T_D_Q"))) %>%
+  rename(Mean_Temperature_of_the_Driest_Quarter = V1, P_AUC = p)
+#extracts the raw data from the response curve
+
+OR10_Biological_Avg_T_D_Q  <- (as.data.frame(dismo::response(OR10_bio, "Avg_T_D_Q"))) %>%
+  rename(Mean_Temperature_of_the_Driest_Quarter = V1, P_OR10 = p)
+#extracts the raw data from the response curve
+```
+
+
+
+###Pearson
+
+```{r, Pearson Response-Curve-Extraction}
+AIC1_Pearson_Precip_Wettest_Q <- (as.data.frame(dismo::response(AIC1_Pearson, "P_We_Q", expand = 70))) %>%
+   rename(Precipitation_of_the_Wettest_Quarter = V1, P_S1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Pearson_Precip_Wettest_Q <- (as.data.frame(dismo::response(AIC2_Pearson, "P_We_Q", expand = 70))) %>%
+  rename(Precipitation_of_the_Wettest_Quarter = V1, P_S2 = p)
+#extracts the raw data from the response curve
+
+AIC3_Pearson_Precip_Wettest_Q <- (as.data.frame(dismo::response(AIC3_Pearson, "P_We_Q", expand = 70))) %>%
+  rename(Precipitation_of_the_Wettest_Quarter = V1, P_S3 = p)
+#extracts the raw data from the response curve
+
+OR10_Pearson_Precip_Wettest_Q <- (as.data.frame(dismo::response(OR10_Pearson, "P_We_Q", expand = 70))) %>%
+  rename(Precipitation_of_the_Wettest_Quarter = V1, P_SOR = p)
+#extracts the raw data from the response curve
+
+AIC1_Pearson_Precip_D_Q <- (as.data.frame(dismo::response(AIC1_Pearson, "P_D_Q"))) %>%
+   rename(Precipitation_of_the_Driest_Quarter = V1, P_S1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Pearson_Precip_D_Q <- (as.data.frame(dismo::response(AIC2_Pearson, "P_D_Q"))) %>%
+  rename(Precipitation_of_the_Driest_Quarter = V1, P_S2 = p)
+#extracts the raw data from the response curve
+
+AIC3_Pearson_Precip_D_Q <- (as.data.frame(dismo::response(AIC3_Pearson, "P_D_Q"))) %>%
+  rename(Precipitation_of_the_Driest_Quarter = V1, P_S3 = p)
+#extracts the raw data from the response curve
+
+OR10_Pearson_Precip_D_Q <- (as.data.frame(dismo::response(OR10_Pearson, "P_D_Q"))) %>%
+  rename(Precipitation_of_the_Driest_Quarter = V1, P_SOR = p)
+#extracts the raw data from the response curve
+
+AIC1_Pearson_SSS_S_M <- (as.data.frame(dismo::response(AIC1_Pearson, "SSS_S_M"))) %>%
+   rename(Sea_Surface_Salinity_of_the_Saltiest_Month = V1, P_S1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Pearson_SSS_S_M <- (as.data.frame(dismo::response(AIC2_Pearson, "SSS_S_M"))) %>%
+  rename(Sea_Surface_Salinity_of_the_Saltiest_Month = V1, P_S2 = p)
+#extracts the raw data from the response curve
+
+AIC3_Pearson_SSS_S_M <- (as.data.frame(dismo::response(AIC3_Pearson, "SSS_S_M"))) %>%
+  rename(Sea_Surface_Salinity_of_the_Saltiest_Month = V1, P_S3 = p)
+#extracts the raw data from the response curve
+
+OR10_Pearson_SSS_S_M  <- (as.data.frame(dismo::response(OR10_Pearson, "SSS_S_M"))) %>%
+  rename(Sea_Surface_Salinity_of_the_Saltiest_Month = V1, P_SOR = p)
+#extracts the raw data from the response curve
+
+AIC1_Pearson_Isotherm <- (as.data.frame(dismo::response(AIC1_Pearson, "Isotherm"))) %>%
+   rename(Isothermality = V1, P_S1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Pearson_Isotherm <- (as.data.frame(dismo::response(AIC2_Pearson, "Isotherm"))) %>%
+  rename(Isothermality = V1, P_S2 = p)
+#extracts the raw data from the response curve
+
+AIC3_Pearson_Isotherm <- (as.data.frame(dismo::response(AIC3_Pearson, "Isotherm"))) %>%
+  rename(Isothermality = V1, P_S3 = p)
+#extracts the raw data from the response curve
+
+OR10_Pearson_Isotherm  <- (as.data.frame(dismo::response(OR10_Pearson, "Isotherm"))) %>%
+  rename(Isothermality = V1, P_SOR = p)
+#extracts the raw data from the response curve
+
+AIC1_Pearson_Mean_D_R <- (as.data.frame(dismo::response(AIC1_Pearson, "Mean_D_R"))) %>%
+   rename(Mean_Diurnal_Range = V1, P_S1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Pearson_Mean_D_R <- (as.data.frame(dismo::response(AIC2_Pearson, "Mean_D_R"))) %>%
+  rename(Mean_Diurnal_Range = V1, P_S2 = p)
+#extracts the raw data from the response curve
+
+AIC3_Pearson_Mean_D_R <- (as.data.frame(dismo::response(AIC3_Pearson, "Mean_D_R"))) %>%
+  rename(Mean_Diurnal_Range = V1, P_S3 = p)
+#extracts the raw data from the response curve
+
+OR10_Pearson_Mean_D_R  <- (as.data.frame(dismo::response(OR10_Pearson, "Mean_D_R"))) %>%
+  rename(Mean_Diurnal_Range = V1, P_SOR = p)
+#extracts the raw data from the response curve
+
+AIC1_Pearson_SSS_F_M <- (as.data.frame(dismo::response(AIC1_Pearson, "SSS_F_M"))) %>%
+   rename(Sea_Surface_Salinity_of_the_Freshest_Month = V1, P_S1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Pearson_SSS_F_M <- (as.data.frame(dismo::response(AIC2_Pearson, "SSS_F_M"))) %>%
+  rename(Sea_Surface_Salinity_of_the_Freshest_Month = V1, P_S2 = p)
+#extracts the raw data from the response curve
+
+AIC3_Pearson_SSS_F_M <- (as.data.frame(dismo::response(AIC3_Pearson, "SSS_F_M"))) %>%
+  rename(Sea_Surface_Salinity_of_the_Freshest_Month = V1, P_S3 = p)
+#extracts the raw data from the response curve
+
+OR10_Pearson_SSS_F_M  <- (as.data.frame(dismo::response(OR10_Pearson, "SSS_F_M"))) %>%
+  rename(Sea_Surface_Salinity_of_the_Freshest_Month = V1, P_SOR = p)
+#extracts the raw data from the response curve
+
+AIC1_Pearson_Avg_T_We_Q <- (as.data.frame(dismo::response(AIC1_Pearson, "Avg_T_We_Q"))) %>%
+   rename(Mean_Temperature_of_the_Wettest_Quarter = V1, P_S1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Pearson_Avg_T_We_Q <- (as.data.frame(dismo::response(AIC2_Pearson, "Avg_T_We_Q"))) %>%
+  rename(Mean_Temperature_of_the_Wettest_Quarter = V1, P_S2 = p)
+#extracts the raw data from the response curve
+
+AIC3_Pearson_Avg_T_We_Q <- (as.data.frame(dismo::response(AIC3_Pearson, "Avg_T_We_Q"))) %>%
+  rename(Mean_Temperature_of_the_Wettest_Quarter = V1, P_S3 = p)
+#extracts the raw data from the response curve
+
+OR10_Pearson_Avg_T_We_Q  <- (as.data.frame(dismo::response(OR10_Pearson, "Avg_T_We_Q"))) %>%
+  rename(Mean_Temperature_of_the_Wettest_Quarter = V1, P_SOR = p)
+#extracts the raw data from the response curve
+
+AIC1_Pearson_P_We_M <- (as.data.frame(dismo::response(AIC1_Pearson, "P_We_M"))) %>%
+   rename(Precipitation_of_the_Wettest_Month = V1, P_S1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Pearson_P_We_M <- (as.data.frame(dismo::response(AIC2_Pearson, "P_We_M"))) %>%
+  rename(Precipitation_of_the_Wettest_Month = V1, P_S2 = p)
+#extracts the raw data from the response curve
+
+AIC3_Pearson_P_We_M <- (as.data.frame(dismo::response(AIC3_Pearson, "P_We_M"))) %>%
+  rename(Precipitation_of_the_Wettest_Month = V1, P_S3 = p)
+#extracts the raw data from the response curve
+
+OR10_Pearson_P_We_M  <- (as.data.frame(dismo::response(OR10_Pearson, "P_We_M"))) %>%
+  rename(Precipitation_of_the_Wettest_Month = V1, P_SOR = p)
+#extracts the raw data from the response curve
+
+AIC1_Pearson_Annual_P <- (as.data.frame(dismo::response(AIC1_Pearson, "Annual_P"))) %>%
+   rename(Annual_Precipitation = V1, P_S1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Pearson_Annual_P <- (as.data.frame(dismo::response(AIC2_Pearson, "Annual_P"))) %>%
+  rename(Annual_Precipitation = V1, P_S2 = p)
+#extracts the raw data from the response curve
+
+AIC3_Pearson_Annual_P <- (as.data.frame(dismo::response(AIC3_Pearson, "Annual_P"))) %>%
+  rename(Annual_Precipitation = V1, P_S3 = p)
+#extracts the raw data from the response curve
+
+OR10_Pearson_Annual_P  <- (as.data.frame(dismo::response(OR10_Pearson, "Annual_P"))) %>%
+  rename(Annual_Precipitation = V1, P_SOR = p)
+#extracts the raw data from the response curve
+
+AIC1_Pearson_SST_C_M <- (as.data.frame(dismo::response(AIC1_Pearson, "SST_C_M"))) %>%
+   rename(Sea_Surface_Temperature_of_the_Coldest_Month = V1, P_S1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Pearson_SST_C_M <- (as.data.frame(dismo::response(AIC2_Pearson, "SST_C_M"))) %>%
+  rename(Sea_Surface_Temperature_of_the_Coldest_Month = V1, P_S2 = p)
+#extracts the raw data from the response curve
+
+AIC3_Pearson_SST_C_M <- (as.data.frame(dismo::response(AIC3_Pearson, "SST_C_M"))) %>%
+  rename(Sea_Surface_Temperature_of_the_Coldest_Month = V1, P_S3 = p)
+#extracts the raw data from the response curve
+
+OR10_Pearson_SST_C_M  <- (as.data.frame(dismo::response(OR10_Pearson, "SST_C_M"))) %>%
+  rename(Sea_Surface_Temperature_of_the_Coldest_Month = V1, P_SOR = p)
+#extracts the raw data from the response curve
+
+AIC1_Pearson_SST_Wa_M <- (as.data.frame(dismo::response(AIC1_Pearson, "SST_Wa_M"))) %>%
+   rename(Sea_Surface_Temperature_of_the_Warmest_Month = V1, P_S1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Pearson_SST_Wa_M <- (as.data.frame(dismo::response(AIC2_Pearson, "SST_Wa_M"))) %>%
+  rename(Sea_Surface_Temperature_of_the_Warmest_Month = V1, P_S2 = p)
+#extracts the raw data from the response curve
+
+AIC3_Pearson_SST_Wa_M <- (as.data.frame(dismo::response(AIC3_Pearson, "SST_Wa_M"))) %>%
+  rename(Sea_Surface_Temperature_of_the_Warmest_Month = V1, P_S3 = p)
+#extracts the raw data from the response curve
+
+OR10_Pearson_SST_Wa_M  <- (as.data.frame(dismo::response(OR10_Pearson, "SST_Wa_M"))) %>%
+  rename(Sea_Surface_Temperature_of_the_Warmest_Month = V1, P_SOR = p)
+#extracts the raw data from the response curve
+
+AIC1_Pearson_Max_T_Wa_M <- (as.data.frame(dismo::response(AIC1_Pearson, "Max_T_Wa_M"))) %>%
+   rename(Maximum_Temperature_of_the_Warmest_Month = V1, P_S1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Pearson_Max_T_Wa_M <- (as.data.frame(dismo::response(AIC2_Pearson, "Max_T_Wa_M"))) %>%
+  rename(Maximum_Temperature_of_the_Warmest_Month = V1, P_S2 = p)
+#extracts the raw data from the response curve
+
+AIC3_Pearson_Max_T_Wa_M <- (as.data.frame(dismo::response(AIC3_Pearson, "Max_T_Wa_M"))) %>%
+  rename(Maximum_Temperature_of_the_Warmest_Month = V1, P_S3 = p)
+#extracts the raw data from the response curve
+
+OR10_Pearson_Max_T_Wa_M  <- (as.data.frame(dismo::response(OR10_Pearson, "Max_T_Wa_M"))) %>%
+  rename(Maximum_Temperature_of_the_Warmest_Month = V1, P_SOR = p)
+#extracts the raw data from the response curve
+
+AIC1_Pearson_Avg_T_D_Q <- (as.data.frame(dismo::response(AIC1_Pearson, "Avg_T_D_Q"))) %>%
+   rename(Mean_Temperature_of_the_Driest_Quarter = V1, P_S1 = p)
+#extracts the raw data from the response curve
+
+AIC2_Pearson_Avg_T_D_Q <- (as.data.frame(dismo::response(AIC2_Pearson, "Avg_T_D_Q"))) %>%
+  rename(Mean_Temperature_of_the_Driest_Quarter = V1, P_S2 = p)
+#extracts the raw data from the response curve
+
+AIC3_Pearson_Avg_T_D_Q <- (as.data.frame(dismo::response(AIC3_Pearson, "Avg_T_D_Q"))) %>%
+  rename(Mean_Temperature_of_the_Driest_Quarter = V1, P_S3 = p)
+#extracts the raw data from the response curve
+
+OR10_Pearson_Avg_T_D_Q  <- (as.data.frame(dismo::response(OR10_Pearson, "Avg_T_D_Q"))) %>%
+  rename(Mean_Temperature_of_the_Driest_Quarter = V1, P_SOR = p)
+#extracts the raw data from the response curve
+```
+
+###Combined Response Curves
+
+#### Response curve graphs
+
+The following code is used to graph response curves before combining in cowplot.
+```{r, Graph Response-Curve-Graphs}
+Response_Curve_labels_ALL <- c(expression(paste(""["Bio"],"AICc"["Avg"])),
+                               expression(paste(""["Pearson"],"AICc"["Avg"])),
+                               expression(paste("AICc1"["Bio"])),
+                               expression(paste("AICc2"["Bio"])),
+                               expression(paste("AUC"["Bio"])),
+                               expression(paste("OR"["10_Bio"])),
+                               expression(paste("AICc1"["Pearson"])),
+                               expression(paste("AICc2"["Pearson"])),
+                               expression(paste("AICc3"["Pearson"])),
+                               expression(paste("OR"["10_Pearson"])))
+#make the labels for graphs which have all the models
+
+Response_Curve_labels_Bio <- c(expression(paste(""["Bio"],"AICc"["Avg"])),
+                               expression(paste("AICc1"["Bio"])),
+                               expression(paste("AICc2"["Bio"])),
+                               expression(paste("AUC"["Bio"])),
+                               expression(paste("OR"["10_Bio"])),
+                               expression(paste("AICc1"["Pearson"])))
+#makes the labels for the graphs which only have biologically informed models
+
+Response_Precip_Wettest_Q <- AIC1_Biological_Precip_Wettest_Q %>%
+  full_join(., AIC2_Biological_Precip_Wettest_Q, by = "Precipitation_of_the_Wettest_Quarter") %>%
+  full_join(.,AUC_Biological_Precip_Wettest_Q, by = "Precipitation_of_the_Wettest_Quarter" ) %>%
+  full_join(.,OR10_Biological_Precip_Wettest_Q, by = "Precipitation_of_the_Wettest_Quarter" ) %>%
+  full_join(.,AIC1_Pearson_Precip_Wettest_Q, by = "Precipitation_of_the_Wettest_Quarter" ) %>%
+  full_join(.,AIC2_Pearson_Precip_Wettest_Q, by = "Precipitation_of_the_Wettest_Quarter" ) %>%
+  full_join(.,AIC3_Pearson_Precip_Wettest_Q, by = "Precipitation_of_the_Wettest_Quarter" ) %>%
+  full_join(.,OR10_Pearson_Precip_Wettest_Q, by = "Precipitation_of_the_Wettest_Quarter" ) %>%
+#the above lines join all the extracted response tables together
+  mutate( "Averaged Biological Model" = ((P_B1 * model_results_bio[1,16]) + (P_B2 * model_results_bio[2,16]))/(model_results_bio[1,16] + model_results_bio[2,16]),
+          "Averaged Pearson Model" = ((P_S1 * model_results_Pearson[1,16]) + (P_S2 * model_results_Pearson[2,16]) + (P_S3 * model_results_Pearson[3,16]))/(model_results_Pearson[1,16] + model_results_Pearson[2,16] + model_results_Pearson[3,16])) %>%
+#these lines calculate the response curves for the averaged models
+  rename("Biological AIC1 Model" = P_B1,
+         "Biological AIC2 Model" = P_B2, 
+         "Biological AUC Model" = P_AUC,
+         "Biological OR10 Model" = P_OR10,
+         "Pearson AIC1 Model" = P_S1,
+         "Pearson AIC2 Model" = P_S2,
+         "Pearson AIC3 Model" = P_S3,
+         "Pearson OR10 Model" = P_SOR) %>%
+#this renames the columns
+  gather(key = "variable", value = "value", -Precipitation_of_the_Wettest_Quarter) %>%
+  rename(Model = variable)
+#this creates a long format to facilitate graphing
+
+P_We_Q_Response_Plot <- ggplot(Response_Precip_Wettest_Q, aes(x=Precipitation_of_the_Wettest_Quarter, y = value)) +
+   geom_line(aes(color = Model, linetype = Model)) + 
+ labs(y = "Predicted Habitat Suitibility", x = "Precipitation of the Wettest Quarter (mm)") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_linetype_manual(labels = Response_Curve_labels_ALL, values=c("solid", "solid", "longdash", "longdash", "longdash", "longdash", "longdash", "dotdash", "dotdash", "dotdash", "dotdash", "dotdash")) +
+  scale_color_manual(labels = Response_Curve_labels_ALL, values=c("blue", "red", "deeppink1", "grey3", "forestgreen", "lightsalmon4", "slateblue", "turquoise", "khaki4", "skyblue"))+
+  labs(color  = "Models", linetype = "Models") + 
+  ylim(0, 1) + xlim(300,800)
+#this graphs using standard colors
+
+Response_Precip_C_Q <- AIC1_Biological_Precip_C_Q %>%
+  full_join(., AIC2_Biological_Precip_C_Q, by = "Precipitation_of_the_Coldest_Quarter") %>%
+  full_join(.,AUC_Biological_Precip_C_Q, by = "Precipitation_of_the_Coldest_Quarter" ) %>%
+  full_join(.,OR10_Biological_Precip_C_Q, by = "Precipitation_of_the_Coldest_Quarter" ) %>%
+#the above lines join all the extracted response tables together
+  mutate( "Averaged Biological Model" = ((P_B1 * model_results_bio[1,16]) + (P_B2 * model_results_bio[2,16]))/(model_results_bio[1,16] + model_results_bio[2,16]))%>%
+#these lines calculate the response curves for the averaged models
+  rename("Biological AIC1 Model" = P_B1,
+         "Biological AIC2 Model" = P_B2, 
+         "Biological AUC Model" = P_AUC,
+         "Biological OR10 Model" = P_OR10) %>%
+#this renames the columns
+  gather(key = "variable", value = "value", -Precipitation_of_the_Coldest_Quarter) %>%
+  rename(Model = variable)
+#this creates a long format to facilitate graphing
+
+P_C_Q_Response_Plot <- ggplot(Response_Precip_C_Q, aes(x=Precipitation_of_the_Coldest_Quarter, y = value)) +
+     geom_line(aes(color = Model, linetype = Model)) + 
+ labs(y = "Predicted Habitat Suitibility", x = "Precipitation of the Coldest Quarter (mm)") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_linetype_manual(labels = Response_Curve_labels_Bio, values=c("solid",  "longdash", "longdash", "longdash", "longdash", "longdash")) +
+   scale_color_manual(labels = Response_Curve_labels_Bio, values=c("blue", "deeppink1", "grey3", "forestgreen", "lightsalmon4"))+
+  labs(color  = "Models", linetype = "Models") +
+  ylim(0, 1)
+#this graphs using standard colors
+#this does not include the Pearson models because the variable was not retained in the Pearson models
+
+Response_Precip_D_Q <- AIC1_Biological_Precip_D_Q %>%
+  full_join(., AIC2_Biological_Precip_D_Q, by = "Precipitation_of_the_Driest_Quarter") %>%
+  full_join(.,AUC_Biological_Precip_D_Q, by = "Precipitation_of_the_Driest_Quarter" ) %>%
+  full_join(.,OR10_Biological_Precip_D_Q, by = "Precipitation_of_the_Driest_Quarter" ) %>%
+  full_join(.,AIC1_Pearson_Precip_D_Q, by = "Precipitation_of_the_Driest_Quarter" ) %>%
+  full_join(.,AIC2_Pearson_Precip_D_Q, by = "Precipitation_of_the_Driest_Quarter" ) %>%
+  full_join(.,AIC3_Pearson_Precip_D_Q, by = "Precipitation_of_the_Driest_Quarter" ) %>%
+  full_join(.,OR10_Pearson_Precip_D_Q, by = "Precipitation_of_the_Driest_Quarter" ) %>%
+  #the above lines join all the extracted response tables together
+  mutate( "Averaged Biological Model" = ((P_B1 * model_results_bio[1,16]) + (P_B2 * model_results_bio[2,16]))/(model_results_bio[1,16] + model_results_bio[2,16]),
+          "Averaged Pearson Model" = ((P_S1 * model_results_Pearson[1,16]) + (P_S2 * model_results_Pearson[2,16]) + (P_S3 * model_results_Pearson[3,16]))/(model_results_Pearson[1,16] + model_results_Pearson[2,16] + model_results_Pearson[3,16])) %>%
+#these lines calculate the response curves for the averaged models
+  rename("Biological AIC1 Model" = P_B1,
+         "Biological AIC2 Model" = P_B2, 
+         "Biological AUC Model" = P_AUC,
+         "Biological OR10 Model" = P_OR10,
+         "Pearson AIC1 Model" = P_S1,
+         "Pearson AIC2 Model" = P_S2,
+         "Pearson AIC3 Model" = P_S3,
+         "Pearson OR10 Model" = P_SOR) %>%
+#this renames the columns
+  gather(key = "variable", value = "value", -Precipitation_of_the_Driest_Quarter) %>%
+  rename(Model = variable)
+#this creates a long format to facilitate graphing
+
+P_D_Q_Response_Plot <- ggplot(Response_Precip_D_Q, aes(x=Precipitation_of_the_Driest_Quarter, y = value)) +
+  geom_line(aes(color = Model, linetype = Model)) + 
+ labs( y = "Predicted Habitat Suitibility", x = "Precipitation of the Driest Quarter (mm)") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_linetype_manual(labels = Response_Curve_labels_ALL, values=c("solid", "solid", "longdash", "longdash", "longdash", "longdash", "longdash", "dotdash", "dotdash", "dotdash", "dotdash", "dotdash")) +
+  scale_color_manual(labels = Response_Curve_labels_ALL, values=c("blue", "red", "deeppink1", "grey3", "forestgreen", "lightsalmon4", "slateblue", "turquoise", "khaki4", "skyblue"))+
+  labs(color  = "Models", linetype = "Models") +
+  ylim(0, 1)
+#this graphs using standard colors
+
+Response_SSS_S_M<- AIC1_Biological_SSS_S_M %>%
+  full_join(., AIC2_Biological_SSS_S_M, by = "Sea_Surface_Salinity_of_the_Saltiest_Month") %>%
+  full_join(.,AUC_Biological_SSS_S_M, by = "Sea_Surface_Salinity_of_the_Saltiest_Month" ) %>%
+  full_join(.,OR10_Biological_SSS_S_M, by = "Sea_Surface_Salinity_of_the_Saltiest_Month" ) %>%
+  full_join(.,AIC1_Pearson_SSS_S_M, by = "Sea_Surface_Salinity_of_the_Saltiest_Month" ) %>%
+  full_join(.,AIC2_Pearson_SSS_S_M, by = "Sea_Surface_Salinity_of_the_Saltiest_Month" ) %>%
+  full_join(.,AIC3_Pearson_SSS_S_M, by = "Sea_Surface_Salinity_of_the_Saltiest_Month" ) %>%
+  full_join(.,OR10_Pearson_SSS_S_M, by = "Sea_Surface_Salinity_of_the_Saltiest_Month" ) %>%
+#the above lines join all the extracted response tables together
+  mutate( "Averaged Biological Model" = ((P_B1 * model_results_bio[1,16]) + (P_B2 * model_results_bio[2,16]))/(model_results_bio[1,16] + model_results_bio[2,16]),
+          "Averaged Pearson Model" = ((P_S1 * model_results_Pearson[1,16]) + (P_S2 * model_results_Pearson[2,16]) + (P_S3 * model_results_Pearson[3,16]))/(model_results_Pearson[1,16] + model_results_Pearson[2,16] + model_results_Pearson[3,16])) %>%
+#these lines calculate the response curves for the averaged models
+  rename("Biological AIC1 Model" = P_B1,
+         "Biological AIC2 Model" = P_B2, 
+         "Biological AUC Model" = P_AUC,
+         "Biological OR10 Model" = P_OR10,
+         "Pearson AIC1 Model" = P_S1,
+         "Pearson AIC2 Model" = P_S2,
+         "Pearson AIC3 Model" = P_S3,
+         "Pearson OR10 Model" = P_SOR) %>%
+#this renames the columns
+  gather(key = "variable", value = "value", -Sea_Surface_Salinity_of_the_Saltiest_Month) %>%
+  rename(Model = variable)
+#this creates a long format to facilitate graphing
+
+
+SSS_S_M_Response_Plot <- ggplot(Response_SSS_S_M, aes(x= Sea_Surface_Salinity_of_the_Saltiest_Month, y = value)) +
+  geom_line(aes(color = Model, linetype = Model)) + 
+ labs(y = "Predicted Habitat Suitibility", x = "Sea Surface Salinity of the Saltiest Month (psu)") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_linetype_manual(labels = Response_Curve_labels_ALL, values=c("solid", "solid", "longdash", "longdash", "longdash", "longdash", "longdash", "dotdash", "dotdash", "dotdash", "dotdash", "dotdash")) +
+  scale_color_manual(labels = Response_Curve_labels_ALL, values=c("blue", "red", "deeppink1", "grey3", "forestgreen", "lightsalmon4", "slateblue", "turquoise", "khaki4", "skyblue")) +
+  labs(color  = "Models", linetype = "Models") +
+  ylim(0, 1)
+#this graphs using standard colors
+
+Response_Isotherm<- AIC1_Biological_Isotherm %>%
+  full_join(., AIC2_Biological_Isotherm, by = "Isothermality") %>%
+  full_join(.,AUC_Biological_Isotherm, by = "Isothermality" ) %>%
+  full_join(.,OR10_Biological_Isotherm, by = "Isothermality" ) %>%
+  full_join(.,AIC1_Pearson_Isotherm, by = "Isothermality" ) %>%
+  full_join(.,AIC2_Pearson_Isotherm, by = "Isothermality" ) %>%
+  full_join(.,AIC3_Pearson_Isotherm, by = "Isothermality" ) %>%
+  full_join(.,OR10_Pearson_Isotherm, by = "Isothermality" ) %>%
+#the above lines join all the extracted response tables together
+  mutate( "Averaged Biological Model" = ((P_B1 * model_results_bio[1,16]) + (P_B2 * model_results_bio[2,16]))/(model_results_bio[1,16] + model_results_bio[2,16]),
+          "Averaged Pearson Model" = ((P_S1 * model_results_Pearson[1,16]) + (P_S2 * model_results_Pearson[2,16]) + (P_S3 * model_results_Pearson[3,16]))/(model_results_Pearson[1,16] + model_results_Pearson[2,16] + model_results_Pearson[3,16])) %>%
+#these lines calculate the response curves for the averaged models
+  rename("Biological AIC1 Model" = P_B1,
+         "Biological AIC2 Model" = P_B2, 
+         "Biological AUC Model" = P_AUC,
+         "Biological OR10 Model" = P_OR10,
+         "Pearson AIC1 Model" = P_S1,
+         "Pearson AIC2 Model" = P_S2,
+         "Pearson AIC3 Model" = P_S3,
+         "Pearson OR10 Model" = P_SOR) %>%
+#this renames the columns
+  gather(key = "variable", value = "value", -Isothermality) %>%
+  rename(Model = variable)
+#this creates a long format to facilitate graphing
+
+Isotherm_Response_Plot <- ggplot(Response_Isotherm, aes(x= Isothermality, y = value)) +
+   geom_line(aes(color = Model, linetype = Model)) + 
+ labs( y = "Predicted Habitat Suitibility", y = "Isothermaility") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_linetype_manual(labels = Response_Curve_labels_ALL, values=c("solid", "solid", "longdash", "longdash", "longdash", "longdash", "longdash", "dotdash", "dotdash", "dotdash", "dotdash", "dotdash")) +
+  scale_color_manual(labels = Response_Curve_labels_ALL, values=c("blue", "red", "deeppink1", "grey3", "forestgreen", "lightsalmon4", "slateblue", "turquoise", "khaki4", "skyblue")) +
+  labs(color  = "Models", linetype = "Models") +
+  ylim(0, 1)
+#this graphs using standard colors
+
+Response_Mean_D_R<- AIC1_Biological_Mean_D_R %>%
+  full_join(., AIC2_Biological_Mean_D_R, by = "Mean_Diurnal_Range") %>%
+  full_join(.,AUC_Biological_Mean_D_R, by = "Mean_Diurnal_Range" ) %>%
+  full_join(.,OR10_Biological_Mean_D_R, by = "Mean_Diurnal_Range" ) %>%
+  full_join(.,AIC1_Pearson_Mean_D_R, by = "Mean_Diurnal_Range" ) %>%
+  full_join(.,AIC2_Pearson_Mean_D_R, by = "Mean_Diurnal_Range" ) %>%
+  full_join(.,AIC3_Pearson_Mean_D_R, by = "Mean_Diurnal_Range" ) %>%
+  full_join(.,OR10_Pearson_Mean_D_R, by = "Mean_Diurnal_Range" ) %>%
+#the above lines join all the extracted response tables together
+  mutate( "Averaged Biological Model" = ((P_B1 * model_results_bio[1,16]) + (P_B2 * model_results_bio[2,16]))/(model_results_bio[1,16] + model_results_bio[2,16]),
+          "Averaged Pearson Model" = ((P_S1 * model_results_Pearson[1,16]) + (P_S2 * model_results_Pearson[2,16]) + (P_S3 * model_results_Pearson[3,16]))/(model_results_Pearson[1,16] + model_results_Pearson[2,16] + model_results_Pearson[3,16])) %>%
+#these lines calculate the response curves for the averaged models
+  rename("Biological AIC1 Model" = P_B1,
+         "Biological AIC2 Model" = P_B2, 
+         "Biological AUC Model" = P_AUC,
+         "Biological OR10 Model" = P_OR10,
+         "Pearson AIC1 Model" = P_S1,
+         "Pearson AIC2 Model" = P_S2,
+         "Pearson AIC3 Model" = P_S3,
+         "Pearson OR10 Model" = P_SOR) %>%
+#this renames the columns
+  gather(key = "variable", value = "value", -Mean_Diurnal_Range) %>%
+  rename(Model = variable)
+#this creates a long format to facilitate graphing
+
+Mean_D_R_Response_Plot <- ggplot(Response_Mean_D_R, aes(x= Mean_Diurnal_Range, y = value)) +
+  geom_line(aes(color = Model, linetype = Model)) + 
+ labs( y = "Predicted Habitat Suitibility", x = "Mean Diurnal Range (°C)") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_linetype_manual(labels = Response_Curve_labels_ALL, values=c("solid", "solid", "longdash", "longdash", "longdash", "longdash", "longdash", "dotdash", "dotdash", "dotdash", "dotdash", "dotdash")) +
+  scale_color_manual(labels = Response_Curve_labels_ALL, values=c("blue", "red", "deeppink1", "grey3", "forestgreen", "lightsalmon4", "slateblue", "turquoise", "khaki4", "skyblue")) +
+  labs(color  = "Models", linetype = "Models") +
+  ylim(0, 1)
+#this graphs using standard colors
+
+Response_Avg_T_Wa_Q<- AIC1_Biological_Avg_T_Wa_Q %>%
+  full_join(., AIC2_Biological_Avg_T_Wa_Q, by = "Mean_Temperature_of_the_Warmest_Quarter") %>%
+  full_join(.,AUC_Biological_Avg_T_Wa_Q, by = "Mean_Temperature_of_the_Warmest_Quarter" ) %>%
+  full_join(.,OR10_Biological_Avg_T_Wa_Q, by = "Mean_Temperature_of_the_Warmest_Quarter") %>%
+#the above lines join all the extracted response tables together
+  mutate( "Averaged Biological Model" = ((P_B1 * model_results_bio[1,16]) + (P_B2 * model_results_bio[2,16]))/(model_results_bio[1,16] + model_results_bio[2,16])) %>%
+#these lines calculate the response curves for the averaged models
+  rename("Biological AIC1 Model" = P_B1,
+         "Biological AIC2 Model" = P_B2, 
+         "Biological AUC Model" = P_AUC,
+         "Biological OR10 Model" = P_OR10) %>%
+#this renames the columns
+  gather(key = "variable", value = "value", -Mean_Temperature_of_the_Warmest_Quarter) %>%
+  rename(Model = variable)
+#this creates a long format to facilitate graphing
+
+
+Avg_T_Wa_Q_Response_Plot <- ggplot(Response_Avg_T_Wa_Q, aes(x= Mean_Temperature_of_the_Warmest_Quarter, y = value))+
+geom_line(aes(color = Model, linetype = Model)) + 
+ labs(y = "Predicted Habitat Suitibility", x = "Average Temperature of the Warmest Quarter (°C)")  +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_linetype_manual(labels = Response_Curve_labels_Bio, values=c("solid",  "longdash", "longdash", "longdash", "longdash", "longdash")) +
+   scale_color_manual(labels = Response_Curve_labels_Bio, values=c("blue", "deeppink1", "grey3", "forestgreen", "lightsalmon4"))+
+  labs(color  = "Models", linetype = "Models") +
+  ylim(0, 1)
+#this graphs using standard colors
+#this does not include the Pearson models because the variable was not retained in the Pearson models
+
+Response_P_Wa_Q<- AIC1_Biological_P_Wa_Q %>%
+  full_join(., AIC2_Biological_P_Wa_Q, by = "Precipitation_of_the_Warmest_Quarter") %>%
+  full_join(.,AUC_Biological_P_Wa_Q, by = "Precipitation_of_the_Warmest_Quarter" ) %>%
+  full_join(.,OR10_Biological_P_Wa_Q, by = "Precipitation_of_the_Warmest_Quarter") %>%
+#the above lines join all the extracted response tables together
+  mutate( "Averaged Biological Model" = ((P_B1 * model_results_bio[1,16]) + (P_B2 * model_results_bio[2,16]))/(model_results_bio[1,16] + model_results_bio[2,16])) %>%
+#these lines calculate the response curves for the averaged models
+  rename("Biological AIC1 Model" = P_B1,
+         "Biological AIC2 Model" = P_B2, 
+         "Biological AUC Model" = P_AUC,
+         "Biological OR10 Model" = P_OR10) %>%
+#this renames the columns
+  gather(key = "variable", value = "value", -Precipitation_of_the_Warmest_Quarter) %>%
+  rename(Model = variable)
+#this creates a long format to facilitate graphing
+
+P_Wa_Q_Response_Plot <- ggplot(Response_P_Wa_Q, aes(x= Precipitation_of_the_Warmest_Quarter, y = value)) +
+ geom_line(aes(color = Model, linetype = Model)) + 
+ labs(y = "Predicted Habitat Suitibility", x = "Precipitation of the Warmest Quarter (mm)") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_linetype_manual(labels = Response_Curve_labels_Bio, values=c("solid",  "longdash", "longdash", "longdash", "longdash", "longdash")) +
+   scale_color_manual(labels = Response_Curve_labels_Bio, values=c("blue", "deeppink1", "grey3", "forestgreen", "lightsalmon4"))+
+  labs(color  = "Models", linetype = "Models") +
+  ylim(0, 1)
+#this graphs using standard colors
+#this does not include the Pearson models because the variable was not retained in the Pearson models
+
+Response_SSS_F_M<- AIC1_Biological_SSS_F_M %>%
+  full_join(., AIC2_Biological_SSS_F_M, by = "Sea_Surface_Salinity_of_the_Freshest_Month") %>%
+  full_join(.,AUC_Biological_SSS_F_M, by = "Sea_Surface_Salinity_of_the_Freshest_Month" ) %>%
+  full_join(.,OR10_Biological_SSS_F_M, by = "Sea_Surface_Salinity_of_the_Freshest_Month" ) %>%
+  full_join(.,AIC1_Pearson_SSS_F_M, by = "Sea_Surface_Salinity_of_the_Freshest_Month" ) %>%
+  full_join(.,AIC2_Pearson_SSS_F_M, by = "Sea_Surface_Salinity_of_the_Freshest_Month" ) %>%
+  full_join(.,AIC3_Pearson_SSS_F_M, by = "Sea_Surface_Salinity_of_the_Freshest_Month" ) %>%
+  full_join(.,OR10_Pearson_SSS_F_M, by = "Sea_Surface_Salinity_of_the_Freshest_Month" ) %>%
+#the above lines join all the extracted response tables together
+  mutate( "Averaged Biological Model" = ((P_B1 * model_results_bio[1,16]) + (P_B2 * model_results_bio[2,16]))/(model_results_bio[1,16] + model_results_bio[2,16]),
+          "Averaged Pearson Model" = ((P_S1 * model_results_Pearson[1,16]) + (P_S2 * model_results_Pearson[2,16]) + (P_S3 * model_results_Pearson[3,16]))/(model_results_Pearson[1,16] + model_results_Pearson[2,16] + model_results_Pearson[3,16])) %>%
+#these lines calculate the response curves for the averaged models
+  rename("Biological AIC1 Model" = P_B1,
+         "Biological AIC2 Model" = P_B2, 
+         "Biological AUC Model" = P_AUC,
+         "Biological OR10 Model" = P_OR10,
+         "Pearson AIC1 Model" = P_S1,
+         "Pearson AIC2 Model" = P_S2,
+         "Pearson AIC3 Model" = P_S3,
+         "Pearson OR10 Model" = P_SOR) %>%
+#this renames the columns
+  gather(key = "variable", value = "value", -Sea_Surface_Salinity_of_the_Freshest_Month) %>%
+  rename(Model = variable)
+#this creates a long format to facilitate graphing
+
+SSS_F_M_Response_Plot <- ggplot(Response_SSS_F_M, aes(x= Sea_Surface_Salinity_of_the_Freshest_Month, y = value)) +
+    geom_line(aes(color = Model, linetype = Model)) + 
+ labs( y = "Predicted Habitat Suitibility", x = "Sea Surface Salinity of the Freshest Month (psu)")  +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_linetype_manual(labels = Response_Curve_labels_ALL, values=c("solid", "solid", "longdash", "longdash", "longdash", "longdash", "longdash", "dotdash", "dotdash", "dotdash", "dotdash", "dotdash")) +
+  scale_color_manual(labels = Response_Curve_labels_ALL, values=c("blue", "red", "deeppink1", "grey3", "forestgreen", "lightsalmon4", "slateblue", "turquoise", "khaki4", "skyblue")) +
+  labs(color  = "Models", linetype = "Models") +
+  ylim(0, 1)
+#this graphs using standard colors
+
+Response_Avg_T_We_Q<- AIC1_Biological_Avg_T_We_Q %>%
+  full_join(., AIC2_Biological_Avg_T_We_Q, by = "Mean_Temperature_of_the_Wettest_Quarter") %>%
+  full_join(.,AUC_Biological_Avg_T_We_Q, by = "Mean_Temperature_of_the_Wettest_Quarter" ) %>%
+  full_join(.,OR10_Biological_Avg_T_We_Q, by = "Mean_Temperature_of_the_Wettest_Quarter" ) %>%
+  full_join(.,AIC1_Pearson_Avg_T_We_Q, by = "Mean_Temperature_of_the_Wettest_Quarter" ) %>%
+  full_join(.,AIC2_Pearson_Avg_T_We_Q, by = "Mean_Temperature_of_the_Wettest_Quarter" ) %>%
+  full_join(.,AIC3_Pearson_Avg_T_We_Q, by = "Mean_Temperature_of_the_Wettest_Quarter" ) %>%
+  full_join(.,OR10_Pearson_Avg_T_We_Q, by = "Mean_Temperature_of_the_Wettest_Quarter" ) %>%
+#the above lines join all the extracted response tables together
+  mutate( "Averaged Biological Model" = ((P_B1 * model_results_bio[1,16]) + (P_B2 * model_results_bio[2,16]))/(model_results_bio[1,16] + model_results_bio[2,16]),
+          "Averaged Pearson Model" = ((P_S1 * model_results_Pearson[1,16]) + (P_S2 * model_results_Pearson[2,16]) + (P_S3 * model_results_Pearson[3,16]))/(model_results_Pearson[1,16] + model_results_Pearson[2,16] + model_results_Pearson[3,16])) %>%
+#these lines calculate the response curves for the averaged models
+  rename("Biological AIC1 Model" = P_B1,
+         "Biological AIC2 Model" = P_B2, 
+         "Biological AUC Model" = P_AUC,
+         "Biological OR10 Model" = P_OR10,
+         "Pearson AIC1 Model" = P_S1,
+         "Pearson AIC2 Model" = P_S2,
+         "Pearson AIC3 Model" = P_S3,
+         "Pearson OR10 Model" = P_SOR) %>%
+#this renames the columns
+  gather(key = "variable", value = "value", -Mean_Temperature_of_the_Wettest_Quarter) %>%
+  rename(Model = variable)
+#this creates a long format to facilitate graphing
+
+Avg_T_We_Q_Response_Plot <- ggplot(Response_Avg_T_We_Q, aes(x= Mean_Temperature_of_the_Wettest_Quarter, y = value)) +   geom_line(aes(color = Model, linetype = Model)) + 
+ labs( y = "Predicted Habitat Suitibility", x = "Mean Temperature of the Wettest Quarter (mm)")   +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_linetype_manual(labels = Response_Curve_labels_ALL, values=c("solid", "solid", "longdash", "longdash", "longdash", "longdash", "longdash", "dotdash", "dotdash", "dotdash", "dotdash", "dotdash")) +
+  scale_color_manual(labels = Response_Curve_labels_ALL, values=c("blue", "red", "deeppink1", "grey3", "forestgreen", "lightsalmon4", "slateblue", "turquoise", "khaki4", "skyblue")) +
+  labs(color  = "Models", linetype = "Models") +
+  ylim(0, 1)
+#this graphs using standard colors
+
+Response_P_We_M<- AIC1_Biological_P_We_M %>%
+  full_join(., AIC2_Biological_P_We_M, by = "Precipitation_of_the_Wettest_Month") %>%
+  full_join(.,AUC_Biological_P_We_M, by = "Precipitation_of_the_Wettest_Month" ) %>%
+  full_join(.,OR10_Biological_P_We_M, by = "Precipitation_of_the_Wettest_Month" ) %>%
+  full_join(.,AIC1_Pearson_P_We_M, by = "Precipitation_of_the_Wettest_Month" ) %>%
+  full_join(.,AIC2_Pearson_P_We_M, by = "Precipitation_of_the_Wettest_Month" ) %>%
+  full_join(.,AIC3_Pearson_P_We_M, by = "Precipitation_of_the_Wettest_Month" ) %>%
+  full_join(.,OR10_Pearson_P_We_M, by = "Precipitation_of_the_Wettest_Month" ) %>%
+#the above lines join all the extracted response tables together
+  mutate( "Averaged Biological Model" = ((P_B1 * model_results_bio[1,16]) + (P_B2 * model_results_bio[2,16]))/(model_results_bio[1,16] + model_results_bio[2,16]),
+          "Averaged Pearson Model" = ((P_S1 * model_results_Pearson[1,16]) + (P_S2 * model_results_Pearson[2,16]) + (P_S3 * model_results_Pearson[3,16]))/(model_results_Pearson[1,16] + model_results_Pearson[2,16] + model_results_Pearson[3,16])) %>%
+#these lines calculate the response curves for the averaged models
+  rename("Biological AIC1 Model" = P_B1,
+         "Biological AIC2 Model" = P_B2, 
+         "Biological AUC Model" = P_AUC,
+         "Biological OR10 Model" = P_OR10,
+         "Pearson AIC1 Model" = P_S1,
+         "Pearson AIC2 Model" = P_S2,
+         "Pearson AIC3 Model" = P_S3,
+         "Pearson OR10 Model" = P_SOR) %>%
+#this renames the columns
+  gather(key = "variable", value = "value", -Precipitation_of_the_Wettest_Month) %>%
+  rename(Model = variable)
+#this creates a long format to facilitate graphing
+
+P_We_M_Response_Plot <- ggplot(Response_P_We_M, aes(x= Precipitation_of_the_Wettest_Month, y = value)) +
+   geom_line(aes(color = Model, linetype = Model)) + 
+ labs( y = "Predicted Habitat Suitibility", x = "Precipitation of the Wettest Month (mm)") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_linetype_manual(labels = Response_Curve_labels_ALL, values=c("solid", "solid", "longdash", "longdash", "longdash", "longdash", "longdash", "dotdash", "dotdash", "dotdash", "dotdash", "dotdash")) +
+  scale_color_manual(labels = Response_Curve_labels_ALL, values=c("blue", "red", "deeppink1", "grey3", "forestgreen", "lightsalmon4", "slateblue", "turquoise", "khaki4", "skyblue")) +
+  labs(color  = "Models", linetype = "Models") +
+  ylim(0, 1)
+#this graphs using standard colors
+
+Response_Annual_P<- AIC1_Biological_Annual_P %>%
+  full_join(., AIC2_Biological_Annual_P, by = "Annual_Precipitation") %>%
+  full_join(.,AUC_Biological_Annual_P, by = "Annual_Precipitation" ) %>%
+  full_join(.,OR10_Biological_Annual_P, by = "Annual_Precipitation" ) %>%
+  full_join(.,AIC1_Pearson_Annual_P, by = "Annual_Precipitation" ) %>%
+  full_join(.,AIC2_Pearson_Annual_P, by = "Annual_Precipitation" ) %>%
+  full_join(.,AIC3_Pearson_Annual_P, by = "Annual_Precipitation" ) %>%
+  full_join(.,OR10_Pearson_Annual_P, by = "Annual_Precipitation" ) %>%
+#the above lines join all the extracted response tables together
+  mutate( "Averaged Biological Model" = ((P_B1 * model_results_bio[1,16]) + (P_B2 * model_results_bio[2,16]))/(model_results_bio[1,16] + model_results_bio[2,16]),
+          "Averaged Pearson Model" = ((P_S1 * model_results_Pearson[1,16]) + (P_S2 * model_results_Pearson[2,16]) + (P_S3 * model_results_Pearson[3,16]))/(model_results_Pearson[1,16] + model_results_Pearson[2,16] + model_results_Pearson[3,16])) %>%
+#these lines calculate the response curves for the averaged models
+  rename("Biological AIC1 Model" = P_B1,
+         "Biological AIC2 Model" = P_B2, 
+         "Biological AUC Model" = P_AUC,
+         "Biological OR10 Model" = P_OR10,
+         "Pearson AIC1 Model" = P_S1,
+         "Pearson AIC2 Model" = P_S2,
+         "Pearson AIC3 Model" = P_S3,
+         "Pearson OR10 Model" = P_SOR) %>%
+#this renames the columns
+  gather(key = "variable", value = "value", -Annual_Precipitation) %>%
+  rename(Model = variable)
+#this creates a long format to facilitate graphing
+
+Annual_P_Response_Plot <- ggplot(Response_Annual_P, aes(x= Annual_Precipitation, y = value)) +
+  geom_line(aes(color = Model, linetype = Model)) + 
+ labs( y = "Predicted Habitat Suitibility", x = "Annual Precipitation (mm)") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_linetype_manual(labels = Response_Curve_labels_ALL, values=c("solid", "solid", "longdash", "longdash", "longdash", "longdash", "longdash", "dotdash", "dotdash", "dotdash", "dotdash", "dotdash")) +
+  scale_color_manual(labels = Response_Curve_labels_ALL, values=c("blue", "red", "deeppink1", "grey3", "forestgreen", "lightsalmon4", "slateblue", "turquoise", "khaki4", "skyblue")) +
+  labs(color  = "Models", linetype = "Models") +
+  ylim(0, 1)
+#this graphs using standard colors
+
+Response_SST_C_M<- AIC1_Biological_SST_C_M %>%
+  full_join(., AIC2_Biological_SST_C_M, by = "Sea_Surface_Temperature_of_the_Coldest_Month") %>%
+  full_join(.,AUC_Biological_SST_C_M, by = "Sea_Surface_Temperature_of_the_Coldest_Month" ) %>%
+  full_join(.,OR10_Biological_SST_C_M, by = "Sea_Surface_Temperature_of_the_Coldest_Month" ) %>%
+  full_join(.,AIC1_Pearson_SST_C_M, by = "Sea_Surface_Temperature_of_the_Coldest_Month" ) %>%
+  full_join(.,AIC2_Pearson_SST_C_M, by = "Sea_Surface_Temperature_of_the_Coldest_Month" ) %>%
+  full_join(.,AIC3_Pearson_SST_C_M, by = "Sea_Surface_Temperature_of_the_Coldest_Month" ) %>%
+  full_join(.,OR10_Pearson_SST_C_M, by = "Sea_Surface_Temperature_of_the_Coldest_Month" ) %>%
+#the above lines join all the extracted response tables together
+  mutate( "Averaged Biological Model" = ((P_B1 * model_results_bio[1,16]) + (P_B2 * model_results_bio[2,16]))/(model_results_bio[1,16] + model_results_bio[2,16]),
+          "Averaged Pearson Model" = ((P_S1 * model_results_Pearson[1,16]) + (P_S2 * model_results_Pearson[2,16]) + (P_S3 * model_results_Pearson[3,16]))/(model_results_Pearson[1,16] + model_results_Pearson[2,16] + model_results_Pearson[3,16])) %>%
+#these lines calculate the response curves for the averaged models
+  rename("Biological AIC1 Model" = P_B1,
+         "Biological AIC2 Model" = P_B2, 
+         "Biological AUC Model" = P_AUC,
+         "Biological OR10 Model" = P_OR10,
+         "Pearson AIC1 Model" = P_S1,
+         "Pearson AIC2 Model" = P_S2,
+         "Pearson AIC3 Model" = P_S3,
+         "Pearson OR10 Model" = P_SOR) %>%
+#this renames the columns
+  gather(key = "variable", value = "value", -Sea_Surface_Temperature_of_the_Coldest_Month) %>%
+  rename(Model = variable)
+#this creates a long format to facilitate graphing
+
+SST_C_M_Response_Plot <- ggplot(Response_SST_C_M, aes(x= Sea_Surface_Temperature_of_the_Coldest_Month, y = value)) +
+  geom_line(aes(color = Model, linetype = Model)) + 
+ labs( y = "Predicted Habitat Suitibility", x = "Sea Surface Temperature of the Coldest Month (°C)") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_linetype_manual(labels = Response_Curve_labels_ALL, values=c("solid", "solid", "longdash", "longdash", "longdash", "longdash", "longdash", "dotdash", "dotdash", "dotdash", "dotdash", "dotdash")) +
+  scale_color_manual(labels = Response_Curve_labels_ALL, values=c("blue", "red", "deeppink1", "grey3", "forestgreen", "lightsalmon4", "slateblue", "turquoise", "khaki4", "skyblue")) +
+  labs(color  = "Models", linetype = "Models") +
+  ylim(0, 1)
+#this graphs using standard colors
+
+Response_SST_Wa_M<- AIC1_Biological_SST_Wa_M %>%
+  full_join(., AIC2_Biological_SST_Wa_M, by = "Sea_Surface_Temperature_of_the_Warmest_Month") %>%
+  full_join(.,AUC_Biological_SST_Wa_M, by = "Sea_Surface_Temperature_of_the_Warmest_Month" ) %>%
+  full_join(.,OR10_Biological_SST_Wa_M, by = "Sea_Surface_Temperature_of_the_Warmest_Month" ) %>%
+  full_join(.,AIC1_Pearson_SST_Wa_M, by = "Sea_Surface_Temperature_of_the_Warmest_Month" ) %>%
+  full_join(.,AIC2_Pearson_SST_Wa_M, by = "Sea_Surface_Temperature_of_the_Warmest_Month" ) %>%
+  full_join(.,AIC3_Pearson_SST_Wa_M, by = "Sea_Surface_Temperature_of_the_Warmest_Month" ) %>%
+  full_join(.,OR10_Pearson_SST_Wa_M, by = "Sea_Surface_Temperature_of_the_Warmest_Month" ) %>%
+#the above lines join all the extracted response tables together
+  mutate( "Averaged Biological Model" = ((P_B1 * model_results_bio[1,16]) + (P_B2 * model_results_bio[2,16]))/(model_results_bio[1,16] + model_results_bio[2,16]),
+          "Averaged Pearson Model" = ((P_S1 * model_results_Pearson[1,16]) + (P_S2 * model_results_Pearson[2,16]) + (P_S3 * model_results_Pearson[3,16]))/(model_results_Pearson[1,16] + model_results_Pearson[2,16] + model_results_Pearson[3,16])) %>%
+#these lines calculate the response curves for the averaged models
+  rename("Biological AIC1 Model" = P_B1,
+         "Biological AIC2 Model" = P_B2, 
+         "Biological AUC Model" = P_AUC,
+         "Biological OR10 Model" = P_OR10,
+         "Pearson AIC1 Model" = P_S1,
+         "Pearson AIC2 Model" = P_S2,
+         "Pearson AIC3 Model" = P_S3,
+         "Pearson OR10 Model" = P_SOR) %>%
+#this renames the columns
+  gather(key = "variable", value = "value", -Sea_Surface_Temperature_of_the_Warmest_Month) %>%
+  rename(Model = variable)
+#this creates a long format to facilitate graphing
+
+SST_Wa_M_Response_Plot <- ggplot(Response_SST_Wa_M, aes(x= Sea_Surface_Temperature_of_the_Warmest_Month, y = value)) +
+  geom_line(aes(color = Model, linetype = Model)) + 
+ labs( y = "Predicted Habitat Suitibility", x = "Sea Surface Temperature of the Coldest Month (°C)")+
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_linetype_manual(labels = Response_Curve_labels_ALL, values=c("solid", "solid", "longdash", "longdash", "longdash", "longdash", "longdash", "dotdash", "dotdash", "dotdash", "dotdash", "dotdash")) +
+  scale_color_manual(labels = Response_Curve_labels_ALL, values=c("blue", "red", "deeppink1", "grey3", "forestgreen", "lightsalmon4", "slateblue", "turquoise", "khaki4", "skyblue")) +
+  labs(color  = "Models", linetype = "Models") +
+  ylim(0, 1)
+
+Response_Avg_T_C_Q <-AIC1_Biological_Avg_T_C_Q %>%
+  full_join(., AIC2_Biological_Avg_T_C_Q, by = "Mean_Temperature_of_the_Coldest_Quarter") %>%
+  full_join(.,AUC_Biological_Avg_T_C_Q, by = "Mean_Temperature_of_the_Coldest_Quarter" ) %>%
+  full_join(.,OR10_Biological_Avg_T_C_Q, by = "Mean_Temperature_of_the_Coldest_Quarter") %>%
+#the above lines join all the extracted response tables together
+  mutate( "Averaged Biological Model" = ((P_B1 * model_results_bio[1,16]) + (P_B2 * model_results_bio[2,16]))/(model_results_bio[1,16] + model_results_bio[2,16])) %>%
+#these lines calculate the response curves for the averaged models
+  rename("Biological AIC1 Model" = P_B1,
+         "Biological AIC2 Model" = P_B2, 
+         "Biological AUC Model" = P_AUC,
+         "Biological OR10 Model" = P_OR10) %>%
+#this renames the columns
+  gather(key = "variable", value = "value", -Mean_Temperature_of_the_Coldest_Quarter) %>%
+  rename(Model = variable)
+#this creates a long format to facilitate graphing
+
+Avg_T_C_Q_Response_Plot <- ggplot(Response_Avg_T_C_Q, aes(x= Mean_Temperature_of_the_Coldest_Quarter, y = value)) +
+  geom_line(aes(color = Model, linetype = Model)) + 
+ labs(y = "Predicted Habitat Suitibility", x = "Mean Temperature of the Coldest Quarter (°C)") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_linetype_manual(labels = Response_Curve_labels_Bio, values=c("solid", "longdash", "longdash", "longdash", "longdash", "longdash")) +
+   scale_color_manual(labels = Response_Curve_labels_Bio, values=c("blue", "deeppink1", "grey3", "forestgreen", "lightsalmon4"))+
+  labs(color  = "Models", linetype = "Models") +
+  ylim(0, 1)
+#this graphs using standard colors
+#this does not include the Pearson models because the variable was not retained in the Pearson models
+
+Response_Max_T_Wa_M<- AIC1_Biological_Max_T_Wa_M %>%
+  full_join(., AIC2_Biological_Max_T_Wa_M, by = "Maximum_Temperature_of_the_Warmest_Month") %>%
+  full_join(.,AUC_Biological_Max_T_Wa_M, by = "Maximum_Temperature_of_the_Warmest_Month" ) %>%
+  full_join(.,OR10_Biological_Max_T_Wa_M, by = "Maximum_Temperature_of_the_Warmest_Month" ) %>%
+  full_join(.,AIC1_Pearson_Max_T_Wa_M, by = "Maximum_Temperature_of_the_Warmest_Month" ) %>%
+  full_join(.,AIC2_Pearson_Max_T_Wa_M, by = "Maximum_Temperature_of_the_Warmest_Month" ) %>%
+  full_join(.,AIC3_Pearson_Max_T_Wa_M, by = "Maximum_Temperature_of_the_Warmest_Month" ) %>%
+  full_join(.,OR10_Pearson_Max_T_Wa_M, by = "Maximum_Temperature_of_the_Warmest_Month" ) %>%
+#the above lines join all the extracted response tables together
+  mutate( "Averaged Biological Model" = ((P_B1 * model_results_bio[1,16]) + (P_B2 * model_results_bio[2,16]))/(model_results_bio[1,16] + model_results_bio[2,16]),
+          "Averaged Pearson Model" = ((P_S1 * model_results_Pearson[1,16]) + (P_S2 * model_results_Pearson[2,16]) + (P_S3 * model_results_Pearson[3,16]))/(model_results_Pearson[1,16] + model_results_Pearson[2,16] + model_results_Pearson[3,16])) %>%
+#these lines calculate the response curves for the averaged models
+  rename("Biological AIC1 Model" = P_B1,
+         "Biological AIC2 Model" = P_B2, 
+         "Biological AUC Model" = P_AUC,
+         "Biological OR10 Model" = P_OR10,
+         "Pearson AIC1 Model" = P_S1,
+         "Pearson AIC2 Model" = P_S2,
+         "Pearson AIC3 Model" = P_S3,
+         "Pearson OR10 Model" = P_SOR) %>%
+#this renames the columns
+  gather(key = "variable", value = "value", -Maximum_Temperature_of_the_Warmest_Month) %>%
+  rename(Model = variable)
+#this creates a long format to facilitate graphing
+
+Max_T_Wa_M_Response_Plot <- ggplot(Response_Max_T_Wa_M, aes(x= Maximum_Temperature_of_the_Warmest_Month, y = value)) + geom_line(aes(color = Model, linetype = Model)) + 
+ labs( y = "Predicted Habitat Suitibility", x = "Max Temperature of the Warmest Month (°C)")+
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_linetype_manual(labels = Response_Curve_labels_ALL, values=c("solid", "solid", "longdash", "longdash", "longdash", "longdash", "longdash", "dotdash", "dotdash", "dotdash", "dotdash", "dotdash")) +
+  scale_color_manual(labels = Response_Curve_labels_ALL, values=c("blue", "red", "deeppink1", "grey3", "forestgreen", "lightsalmon4", "slateblue", "turquoise", "khaki4", "skyblue")) +
+  labs(color  = "Models", linetype = "Models") +
+  ylim(0, 1)
+#this graphs using standard colors
+
+Response_Avg_T_D_Q<- AIC1_Biological_Avg_T_D_Q %>%
+  full_join(., AIC2_Biological_Avg_T_D_Q, by = "Mean_Temperature_of_the_Driest_Quarter") %>%
+  full_join(.,AUC_Biological_Avg_T_D_Q, by = "Mean_Temperature_of_the_Driest_Quarter" ) %>%
+  full_join(.,OR10_Biological_Avg_T_D_Q, by = "Mean_Temperature_of_the_Driest_Quarter" ) %>%
+  full_join(.,AIC1_Pearson_Avg_T_D_Q, by = "Mean_Temperature_of_the_Driest_Quarter" ) %>%
+  full_join(.,AIC2_Pearson_Avg_T_D_Q, by = "Mean_Temperature_of_the_Driest_Quarter" ) %>%
+  full_join(.,AIC3_Pearson_Avg_T_D_Q, by = "Mean_Temperature_of_the_Driest_Quarter" ) %>%
+  full_join(.,OR10_Pearson_Avg_T_D_Q, by = "Mean_Temperature_of_the_Driest_Quarter" ) %>%
+#the above lines join all the extracted response tables together
+  mutate( "Averaged Biological Model" = ((P_B1 * model_results_bio[1,16]) + (P_B2 * model_results_bio[2,16]))/(model_results_bio[1,16] + model_results_bio[2,16]),
+          "Averaged Pearson Model" = ((P_S1 * model_results_Pearson[1,16]) + (P_S2 * model_results_Pearson[2,16]) + (P_S3 * model_results_Pearson[3,16]))/(model_results_Pearson[1,16] + model_results_Pearson[2,16] + model_results_Pearson[3,16])) %>%
+#these lines calculate the response curves for the averaged models
+  rename("Biological AIC1 Model" = P_B1,
+         "Biological AIC2 Model" = P_B2, 
+         "Biological AUC Model" = P_AUC,
+         "Biological OR10 Model" = P_OR10,
+         "Pearson AIC1 Model" = P_S1,
+         "Pearson AIC2 Model" = P_S2,
+         "Pearson AIC3 Model" = P_S3,
+         "Pearson OR10 Model" = P_SOR) %>%
+#this renames the columns
+  gather(key = "variable", value = "value", -Mean_Temperature_of_the_Driest_Quarter) %>%
+  rename(Model = variable)
+#this creates a long format to facilitate graphing
+
+Avg_T_D_Q_Response_Plot <- ggplot(Response_Avg_T_D_Q, aes(x= Mean_Temperature_of_the_Driest_Quarter, y = value)) +
+   geom_line(aes(color = Model, linetype = Model)) + 
+ labs( y = "Predicted Habitat Suitibility", x = "Mean Temperature of the Driest Month (°C)") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_linetype_manual(labels = Response_Curve_labels_ALL, values=c("solid", "solid", "longdash", "longdash", "longdash", "longdash", "longdash", "dotdash", "dotdash", "dotdash", "dotdash", "dotdash")) +
+  scale_color_manual(labels = Response_Curve_labels_ALL, values=c("blue", "red", "deeppink1", "grey3", "forestgreen", "lightsalmon4", "slateblue", "turquoise", "khaki4", "skyblue")) +
+  labs(color  = "Models", linetype = "Models") +
+  ylim(0, 1)
+  #this graphs using standard colors
+```
+#### Combining Graphs
+
+The following code is combine response curve graphs in cowplot.
+```{r, Combing Response-Curve-Graphs}
+theme_set(theme_cowplot(font_size = 10))
+#set theme for combined graph
+
+Response_Curves_Most_Important_Legend <- get_legend(SSS_S_M_Response_Plot +
+                                                      theme(legend.box.margin = margin(0,0,0,12)) + 
+                                                       theme_cowplot(font_size = 14))
+
+Legend_Most_Important <- plot_grid(Response_Curves_Most_Important_Legend)
+
+#create shared legend
+Title <- ggdraw() + 
+  draw_label("Top Variable Response Curves", 
+             fontface = 'bold',
+    x = 0,
+    hjust = 0) +
+  theme(
+    plot.margin = margin(0, 0, 0, 250)
+  )
+#create title
+
+Response_Curves_Most_Important <-plot_grid(P_We_Q_Response_Plot + theme(legend.position = "none"),
+                                           P_D_Q_Response_Plot + theme(axis.text.y = element_blank(),
+                                                                         axis.ticks.y = element_blank(),
+                                                                         axis.title.y = element_blank(),
+                                                                         legend.position = "none"),
+                                           SSS_S_M_Response_Plot + theme(legend.position = "none",
+                                                                         axis.text.y = element_blank(),
+                                                                         axis.ticks.y = element_blank(),
+                                                                         axis.title.y = element_blank()),
+                                           Isotherm_Response_Plot + theme(legend.position = "none"),
+                                           Mean_D_R_Response_Plot + theme(axis.text.y = element_blank(),
+                                                                         axis.ticks.y = element_blank(),
+                                                                         axis.title.y = element_blank(),
+                                                                         legend.position = "none"),
+                                           Legend_Most_Important,
+                                           align = "h",
+                                           axis = "bt")
+                                        
+#combined graphs
+
+Response_Curves_Most_Important <- plot_grid(Title, Response_Curves_Most_Important, ncol = 1, rel_heights = c(.1,1)) +
+  theme(plot.margin = margin(0,60,30,30))
+#combined graphs and title
+
+theme_set(theme_cowplot(font_size = 5))
+#set theme
+
+
+Title_all <- ggdraw() + 
+  draw_label("Variable Response Curves", 
+             fontface = 'bold',
+    x = 0,
+    hjust = 0) +
+  theme(
+    plot.margin = margin(0, 0, 0, 250)
+  )
+#create tittle
+
+Response_Curves_All <- plot_grid(P_We_Q_Response_Plot + theme(axis.title.y = element_blank(),
+                                                              legend.position = "none"),
+                                           P_C_Q_Response_Plot + theme(axis.text.y = element_blank(),
+                                                                         axis.ticks.y = element_blank(),
+                                                                         axis.title.y = element_blank(),
+                                                                         legend.position = "none"),
+                                           P_D_Q_Response_Plot + theme(axis.text.y = element_blank(),
+                                                                         axis.ticks.y = element_blank(),
+                                                                         axis.title.y = element_blank(),
+                                                                         legend.position = "none"),
+                                           SSS_S_M_Response_Plot + theme(axis.text.y = element_blank(),
+                                                                         axis.ticks.y = element_blank(),
+                                                                         axis.title.y = element_blank(),
+                                                                         legend.position = "none"),
+                                           Isotherm_Response_Plot + theme(axis.text.y = element_blank(),
+                                                                         axis.ticks.y = element_blank(),
+                                                                         axis.title.y = element_blank(),
+                                                                         legend.position = "none"),
+                                           Mean_D_R_Response_Plot + theme(axis.title.y = element_blank(),
+                                                                          legend.position = "none"),
+                                           P_We_M_Response_Plot + theme(axis.text.y = element_blank(),
+                                                                         axis.ticks.y = element_blank(),
+                                                                         axis.title.y = element_blank(),
+                                                                         legend.position = "none"),
+                                           SSS_F_M_Response_Plot + theme(axis.text.y = element_blank(),
+                                                                         axis.ticks.y = element_blank(),
+                                                                         axis.title.y = element_blank(),
+                                                                         legend.position = "none"),
+                                           SST_Wa_M_Response_Plot + theme(axis.text.y = element_blank(),
+                                                                         axis.ticks.y = element_blank(),
+                                                                         axis.title.y = element_blank(),
+                                                                         legend.position = "none"),
+                                           Max_T_Wa_M_Response_Plot + theme(axis.text.y = element_blank(),
+                                                                         axis.ticks.y = element_blank(),
+                                                                         axis.title.y = element_blank(),
+                                                                         legend.position = "none"),
+                                           Avg_T_We_Q_Response_Plot + theme(axis.title.y = element_blank(),
+                                                                            legend.position = "none"),
+                                           Annual_P_Response_Plot + theme(axis.text.y = element_blank(),
+                                                                         axis.ticks.y = element_blank(),
+                                                                         axis.title.y = element_blank(),
+                                                                         legend.position = "none"),
+                                           SST_C_M_Response_Plot + theme(axis.text.y = element_blank(),
+                                                                         axis.ticks.y = element_blank(),
+                                                                         axis.title.y = element_blank(),
+                                                                         legend.position = "none"),
+                                           Avg_T_D_Q_Response_Plot + theme(axis.text.y = element_blank(),
+                                                                         axis.ticks.y = element_blank(),
+                                                                         axis.title.y = element_blank(),
+                                                                         legend.position = "none"),
+                                           Avg_T_Wa_Q_Response_Plot + theme(axis.text.y = element_blank(),
+                                                                         axis.ticks.y = element_blank(),
+                                                                         axis.title.y = element_blank(),
+                                                                         legend.position = "none"),
+                                           P_Wa_Q_Response_Plot + theme(axis.title.y = element_blank(),
+                                                                        legend.position = "none"),
+                                           Avg_T_C_Q_Response_Plot + theme(axis.text.y = element_blank(),
+                                                                         axis.ticks.y = element_blank(),
+                                                                         axis.title.y = element_blank(),
+                                                                         legend.position = "none"),
+                                           align = "h",
+                                           axis = "bt")
+
+#here I did not combine graphs and legends in R. Due to the size of the graphic, it was easier to export as a pdf then edit it directly in Adobe.
+# For all above graphs, fine tuning for publication was done by exporting the plot as a pdf and changing fonts, sizes, and orientation in R, if need be.
+```
+##Additional Biological Models Investigating Response curve Discrepencies
+
+Some response curves demonstrated contradictory predictions across models. To investigate if the contradiction was a statistical artifact, we ran the models with and without some highly correlated variables to compare the response curves. The code chunks below run our additional supplementary analysis. 
+
+
+```{r, AUX Environmental-Variables}
+files_Biological_2 <- list.files( path = "C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/Data_Model_Development/Biological_2", full.names = TRUE )
+#gets a list of the files for an automated raster import (Biologically Informed). All files must be in the same folder.P_D_Q but not P_C_Q
+
+files_Biological_3 <- list.files( path = "C:/Users/antho/Desktop/ARCGIS/Projects/ENM_Rivulus/R_Folder/Data_Model_Development/Biological_3", full.names = TRUE )
+#gets a list of the files for an automated raster import (Biologically Informed). All files must be in the same folder.P_C_Q but not P_D_Q
+
+envs_biological_2 <- stack(files_Biological_2)
+#load the Biologically Informed variable set in a raster stack
+
+envs_biological_3 <- stack(files_Biological_3)
+#load the Biologically Informed variable set in a raster stack
+```
+
+```{r, AUX Maxent-Modeling}
+model_bio_2 <- ENMevaluate(occ=occs.sp, env=envs_biological_2, bg.coords=bg, method='block', RMvalues=c(.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5), fc=c("L", "LQ", "Q", "LQH", "LH", "QH", "H"), algorithm='maxent.jar')
+#runs models at each rm value and each feature class for the biologically informed variable set
+
+model_bio_3 <- ENMevaluate(occ=occs.sp, env=envs_biological_3, bg.coords=bg, method='block', RMvalues=c(.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5), fc=c("L", "LQ", "Q", "LQH", "LH", "QH", "H"), algorithm='maxent.jar')
+#runs models at each rm value and each feature class for the biologically informed variable set
+```
+
+```{r, AUX Extracting-Top-Models}
+model_results_bio_2 <- as.data.frame(model_bio_2@results) %>%
+#converts the results to a  data frame
+  filter(avg.test.AUC >= .6 & !is.na(AICc)) %>%
+#filters out NAs and test AUC below .65
+  arrange(AICc)
+#orders in ascending order by AICc
+
+AICc_vector_bio_2 <- as.vector(model_results_bio_2$AICc)
+#creates a vector of the AICcs of the filtered data set
+
+AICw_bio_2 <- akaike.weights(AICc_vector_bio_2)
+#calculates the AICw from the AIcc vector of the filtered data set
+
+model_results_bio_2 <- model_results_bio_2%>%
+#overwrite model_results_bio_2
+  dplyr::select(-w.AIC) %>%
+#drops the current w.AIC
+  mutate(wAICc = AICw_bio_2$weights)
+#adds the new AIC weights based on the filtered model set the the results table
+
+
+
+AIC1_bio_2 <- model_bio_2@models[[which(model_bio_2@results$settings=="H_5")]]
+#get the lowest AICc model
+
+AIC2_bio_2 <- model_bio_2@models[[which(model_bio_2@results$settings == "H_2")]]
+#gets second lowest AICc model
+
+AIC3_bio_2 <- model_bio_2@models[[which(model_bio_2@results$settings == "H_4.5")]]
+#gets second lowest AICc model
+
+AIC4_bio_2 <- model_bio_2@models[[which(model_bio_2@results$settings == "H_2.5")]]
+#gets second lowest AICc model
+
+AUC_bio_2 <- model_bio_2@models[[which(model_bio_2@results$settings == "H_1.5")]]
+#gets highest AUC model
+
+
+model_results_bio_3 <- as.data.frame(model_bio_3@results) %>%
+#converts the results to a  data frame
+  filter(avg.test.AUC >= .6 & !is.na(AICc)) %>%
+#filters out NAs and test AUC below .65
+  arrange(AICc)
+#orders in ascending order by AICc
+
+AICc_vector_bio_3 <- as.vector(model_results_bio_3$AICc)
+#creates a vector of the AICcs of the filtered data set
+
+AICw_bio_3 <- akaike.weights(AICc_vector_bio_3)
+#calculates the AICw from the AIcc vector of the filtered data set
+
+model_results_bio_3 <- model_results_bio_3%>%
+#overwrite model_results_bio_3
+  dplyr::select(-w.AIC) %>%
+#drops the current w.AIC
+  mutate(wAICc = AICw_bio_3$weights)
+#adds the new AIC weights based on the filtered model set the the results table
+
+
+
+AIC1_bio_3 <- model_bio_3@models[[which(model_bio_3@results$settings=="H_5")]]
+#get the lowest AICc model
+
+AIC2_bio_3 <- model_bio_3@models[[which(model_bio_3@results$settings == "H_4.5")]]
+#gets second lowest AICc model
+
+AUC_bio_3 <- model_bio_3@models[[which(model_bio_3@results$settings == "H_1.5")]]
+#gets highest AUC model
+
+OR10_bio_3 <- model_bio_3@models[[which(model_bio_3@results$settings == "H_2")]]
+#gets lowest OR10 model
+```
+
+#### Bioloigcally informed with Precipitiation of the Driest Quarter and not Precipitiation of the Coldest Quarter
+```{r, AUX Bio2 Response-Curve-Extraction}
+
+AIC1_Biological_2_Precip_D_Q <- (as.data.frame(dismo::response(AIC1_bio_2, "P_D_Q"))) %>%
+  rename(Precipitation_of_the_Driest_Quarter = V1, P_B21 = p)
+#extracts the raw data from the response curve
+
+AIC2_Biological_2_Precip_D_Q <- (as.data.frame(dismo::response(AIC2_bio_2, "P_D_Q"))) %>%
+  rename(Precipitation_of_the_Driest_Quarter = V1, P_B22 = p)
+#extracts the raw data from the response curve
+
+AIC3_Biological_2_Precip_D_Q <- (as.data.frame(dismo::response(AIC3_bio_2, "P_D_Q"))) %>%
+  rename(Precipitation_of_the_Driest_Quarter = V1, P_B23 = p)
+#extracts the raw data from the response curve
+
+AIC4_Biological_2_Precip_D_Q <- (as.data.frame(dismo::response(AIC4_bio_2, "P_D_Q"))) %>%
+  rename(Precipitation_of_the_Driest_Quarter = V1, P_B24 = p)
+#extracts the raw data from the response curve
+
+AUC_Biological_2_Precip_D_Q <- (as.data.frame(dismo::response(AUC_bio_2, "P_D_Q"))) %>%
+  rename(Precipitation_of_the_Driest_Quarter = V1, P_B2AUC = p)
+#extracts the raw data from the response curve
+
+AIC1_Biological_2_SSS_F_M <- (as.data.frame(dismo::response(AIC1_bio_2, "SSS_F_M"))) %>%
+  rename(Sea_Surface_Salinity_of_the_Freshest_Month = V1, P_B21 = p)
+#extracts the raw data from the response curve
+
+AIC2_Biological_2_SSS_F_M<- (as.data.frame(dismo::response(AIC2_bio_2, "SSS_F_M"))) %>%
+  rename(Sea_Surface_Salinity_of_the_Freshest_Month = V1, P_B22 = p)
+#extracts the raw data from the response curve
+
+AIC3_Biological_2_SSS_F_M <- (as.data.frame(dismo::response(AIC3_bio_2, "SSS_F_M"))) %>%
+  rename(Sea_Surface_Salinity_of_the_Freshest_Month = V1, P_B23 = p)
+#extracts the raw data from the response curve
+
+AIC4_Biological_2_SSS_F_M <- (as.data.frame(dismo::response(AIC4_bio_2, "SSS_F_M"))) %>%
+  rename(Sea_Surface_Salinity_of_the_Freshest_Month = V1, P_B24 = p)
+#extracts the raw data from the response curve
+
+AUC_Biological_2_SSS_F_M <- (as.data.frame(dismo::response(AUC_bio_2, "SSS_F_M"))) %>%
+  rename(Sea_Surface_Salinity_of_the_Freshest_Month = V1, P_B2AUC = p)
+#extracts the raw data from the response curve
+
+
+```
+
+#### Biologically informed with Precipitation of the Coldest Quarter instead of Precipitation of the Driest Quarter 
+```{r, AUX Bio3 Response-Curve-Extraction}
+
+AIC1_Biological_3_Precip_C_Q <- (as.data.frame(dismo::response(AIC1_bio_3, "P_C_Q"))) %>%
+  rename(Precipitation_Coldest_Quarter = V1, P_B31 = p)
+#extracts the raw data from the response curve
+
+AIC2_Biological_3_Precip_C_Q <- (as.data.frame(dismo::response(AIC2_bio_3, "P_C_Q"))) %>%
+  rename(Precipitation_Coldest_Quarter = V1, P_B32 = p)
+#extracts the raw data from the response curve
+
+AUC_Biological_3_Precip_C_Q <- (as.data.frame(dismo::response(AUC_bio_3, "P_C_Q"))) %>%
+  rename(Precipitation_Coldest_Quarter = V1, P_B3AUC = p)
+#extracts the raw data from the response curve
+
+OR10_Biological_3_Precip_C_Q <- (as.data.frame(dismo::response(OR10_bio_3, "P_C_Q"))) %>%
+  rename(Precipitation_Coldest_Quarter = V1, P_B3OR10 = p)
+#extracts the raw data from the response curve
+
+AIC1_Biological_3_SSS_F_M  <- (as.data.frame(dismo::response(AIC1_bio_3, "SSS_F_M"))) %>%
+  rename(Sea_Surface_Salinity_of_the_Freshest_Month = V1, P_B31 = p)
+#extracts the raw data from the response curve
+
+AIC2_Biological_3_SSS_F_M  <- (as.data.frame(dismo::response(AIC2_bio_3, "SSS_F_M"))) %>%
+  rename(Sea_Surface_Salinity_of_the_Freshest_Month = V1, P_B32 = p)
+#extracts the raw data from the response curve
+
+AUC_Biological_3_SSS_F_M  <- (as.data.frame(dismo::response(AUC_bio_3, "SSS_F_M"))) %>%
+  rename(Sea_Surface_Salinity_of_the_Freshest_Month = V1, P_B3AUC = p)
+#extracts the raw data from the response curve
+
+OR10_Biological_3_SSS_F_M  <- (as.data.frame(dismo::response(OR10_bio_3, "SSS_F_M"))) %>%
+  rename(Sea_Surface_Salinity_of_the_Freshest_Month = V1, P_B3OR10 = p)
+#extracts the raw data from the response curve
+```
+
+### Combine Graphs
+```{r, AUX Combine-Graphs}
+theme_set(theme_cowplot(font_size = 5))
+
+Response_Curve_labels_Bio2 <- c(expression(paste("AICc1"["Bio2"])),
+                               expression(paste("AICc2"["Bio2"])),
+                               expression(paste("AICc3"["Bio2"])),
+                               expression(paste("AICc4"["Bio2"])),
+                               expression(paste("AUC"["Bio2"])))
+
+#make the labels for graphs which have all the models
+Response_Precip_D_Q_Bio_Extra<- AIC1_Biological_2_Precip_D_Q %>%
+  full_join(., AIC2_Biological_2_Precip_D_Q, by = "Precipitation_of_the_Driest_Quarter") %>%
+  full_join(.,AIC3_Biological_2_Precip_D_Q, by = "Precipitation_of_the_Driest_Quarter" ) %>%
+  full_join(.,AIC4_Biological_2_Precip_D_Q, by = "Precipitation_of_the_Driest_Quarter" ) %>%
+  full_join(.,AUC_Biological_2_Precip_D_Q, by = "Precipitation_of_the_Driest_Quarter" ) %>%
+    rename("Biological2 AIC1 Model" = P_B21,
+         "Biological2 AIC2 Model" = P_B22,
+         "Biological2 AIC3 Model" = P_B23,
+         "Biological2 AIC4 Model" = P_B24,
+         "Biological2 AUC Model" = P_B2AUC) %>%
+#this renames the columns
+  gather(key = "variable", value = "value", -Precipitation_of_the_Driest_Quarter) %>%
+  rename(Model = variable)
+#this creates a long format to facilitate graphing
+
+Response_Precip_D_Q_Bio_Extra_Plot <- ggplot(Response_Precip_D_Q_Bio_Extra, aes(x= Precipitation_of_the_Driest_Quarter, y = value)) +
+   geom_line(aes(color = Model, linetype = Model)) + 
+ labs( y = "Predicted Habitat Suitibility", x = "Precipitation of the Driest Quarter (mm)") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_linetype_manual(labels = Response_Curve_labels_Bio2, values=c("solid","longdash","dotdash","dashed","solid")) +
+  scale_color_manual(labels = Response_Curve_labels_Bio2, values=c("blue", "red", "deeppink1", "grey3", "forestgreen")) +
+  ylim(0, 1)
+  #this graphs using standard colors
+
+ +
+  scale_linetype_manual(labels = Response_Curve_labels_Bio2, values=c("longdash","longdash","longdash","longdash","longdash")) %>%
+  
+  
+
+Response_Curve_labels_Bio3 <- c(expression(paste("AICc1"["Bio3"])),
+                               expression(paste("AICc2"["Bio3"])),
+                               expression(paste("AUC"["Bio3"])),
+                               expression(paste("OR"["Bio3_10"])))
+
+
+Response_Precip_C_Q_Bio_Extra<- AIC1_Biological_3_Precip_C_Q %>%
+  full_join(., AIC2_Biological_3_Precip_C_Q, by = "Precipitation_Coldest_Quarter") %>%
+  full_join(.,AUC_Biological_3_Precip_C_Q, by = "Precipitation_Coldest_Quarter" ) %>%
+  full_join(.,OR10_Biological_3_Precip_C_Q, by = "Precipitation_Coldest_Quarter" ) %>%
+    rename("Biological3 AIC1 Model" = P_B31,
+         "Biological3 AIC2 Model" = P_B32,
+         "Biological3 AUC Model" = P_B3AUC,
+         "Biological3 OR10 Model" = P_B3OR10) %>%
+#this renames the columns
+  gather(key = "variable", value = "value", -Precipitation_Coldest_Quarter) %>%
+  rename(Model = variable) %>%
+#this creates a long format to facilitate graphing
+  mutate(Model = factor(Model, levels = c("Biological3 AIC1 Model",
+                                          "Biological3 AIC2 Model",
+                                          "Biological3 AUC Model",
+                                          "Biological3 OR10 Model")))
+
+Response_Precip_C_Q_Bio_Extra_Plot <- ggplot(Response_Precip_C_Q_Bio_Extra, aes(x= Precipitation_Coldest_Quarter, y = value)) +
+   geom_line(aes(color = Model, linetype = Model)) + 
+ labs( y = "Predicted Habitat Suitibility", x = "Precipitation of the Coldest Quarter (mm)") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_linetype_manual(labels = Response_Curve_labels_Bio3, values=c("solid","longdash","dotdash","dashed")) + 
+  scale_color_manual(labels = Response_Curve_labels_Bio3, values=c("lightsalmon4", "slateblue", "turquoise", "khaki4")) +
+  ylim(0, 1)
+  #this graphs using standard colors
+
+Response_Curve_labels_Bio_Extra_All <- c(expression(paste("AICc1"["Bio2"])),
+                               expression(paste("AICc2"["Bio2"])),
+                               expression(paste("AICc3"["Bio2"])),
+                               expression(paste("AICc4"["Bio2"])),
+                               expression(paste("AUC"["Bio2"])),
+                               expression(paste("AICc1"["Bio3"])),
+                               expression(paste("AICc2"["Bio3"])),
+                               expression(paste("AUC"["Bio3"])),
+                               expression(paste("OR"["Bio3_10"])))
+
+Response_SSS_S_M_Bio_Extra<- AIC1_Biological_2_SSS_F_M %>%
+  full_join(., AIC2_Biological_2_SSS_F_M, by = "Sea_Surface_Salinity_of_the_Freshest_Month") %>%
+  full_join(.,AIC3_Biological_2_SSS_F_M, by = "Sea_Surface_Salinity_of_the_Freshest_Month" ) %>%
+  full_join(.,AIC4_Biological_2_SSS_F_M, by = "Sea_Surface_Salinity_of_the_Freshest_Month" ) %>%
+  full_join(., AUC_Biological_2_SSS_F_M, by = "Sea_Surface_Salinity_of_the_Freshest_Month") %>%
+  full_join(.,AIC1_Biological_3_SSS_F_M, by = "Sea_Surface_Salinity_of_the_Freshest_Month" ) %>%
+  full_join(.,AIC2_Biological_3_SSS_F_M, by = "Sea_Surface_Salinity_of_the_Freshest_Month" ) %>%
+  full_join(.,AUC_Biological_3_SSS_F_M, by = "Sea_Surface_Salinity_of_the_Freshest_Month" ) %>%
+  full_join(.,OR10_Biological_3_SSS_F_M, by = "Sea_Surface_Salinity_of_the_Freshest_Month" ) %>%
+    rename("Biological2 AIC1 Model" = P_B21,
+         "Biological2 AIC2 Model" = P_B22,
+         "Biological2 AIC3 Model" = P_B23,
+         "Biological2 AIC4 Model" = P_B24,
+         "Biological2 AUC Model" = P_B2AUC,
+        "Biological3 AIC1 Model" = P_B31,
+         "Biological3 AIC2 Model" = P_B32,
+         "Biological3 AUC Model" = P_B3AUC,
+         "Biological3 OR10 Model" = P_B3OR10) %>%
+#this renames the columns
+  gather(key = "variable", value = "value", -Sea_Surface_Salinity_of_the_Freshest_Month) %>%
+  rename(Model = variable) %>%
+#this creates a long format to facilitate graphing
+  mutate(Model = factor(Model, levels = c("Biological2 AIC1 Model",
+                                          "Biological2 AIC2 Model",
+                                          "Biological2 AIC3 Model",
+                                          "Biological2 AIC4 Model",
+                                          "Biological2 AUC Model",
+                                          "Biological3 AIC1 Model",
+                                          "Biological3 AIC2 Model",
+                                          "Biological3 AUC Model",
+                                          "Biological3 OR10 Model")))
+
+Response_SSS_F_M_Bio_Extra_Plot <- ggplot(Response_SSS_S_M_Bio_Extra, aes(x= Sea_Surface_Salinity_of_the_Freshest_Month, y = value)) +
+   geom_line(aes(color = Model, linetype = Model)) + 
+ labs( y = "Predicted Habitat Suitibility", x = "Sea Surface Salinity of the Freshest Month (psu)") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_linetype_manual(labels = Response_Curve_labels_Bio_Extra_All, values=c("solid","longdash","dotdash","dashed","solid", "solid","longdash","dotdash","dashed")) +
+  scale_color_manual(labels = Response_Curve_labels_Bio_Extra_All, values=c("blue", "red", "deeppink1", "grey3", "forestgreen", "lightsalmon4", "slateblue", "turquoise", "khaki4")) +
+  ylim(0, 1)
+  #this graphs using standard colors
+Response_Curves_Bio_Extra_Legend <- get_legend(Response_SSS_F_M_Bio_Extra_Plot +
+                                                 theme_cowplot(font_size = 15) +
+                                                      theme(legend.box.margin = margin(0,0,0, 100))) 
+                                                    
+
+Response_Curves_Bio_Extra_Top <- plot_grid(Response_Precip_D_Q_Bio_Extra_Plot + theme(legend.position = "none"),
+                                           Response_Precip_C_Q_Bio_Extra_Plot + theme(legend.position = "none",
+                                                                                      axis.text.y = element_blank(),
+                                                                                      axis.ticks.y = element_blank(),
+                                                                                      axis.title.y = element_blank()),
+                                           align = "h",
+                                           axis = "bt")
+Response_Cruves_Bio_Extra_Bottom <-plot_grid(Response_SSS_F_M_Bio_Extra_Plot + theme(legend.position = "none"),
+                                             Response_Curves_Bio_Extra_Legend, rel_widths = c(1, 1))
+
+Response_Curves_Bio_Extra_All <- plot_grid(Response_Curves_Bio_Extra_Top,
+                                           Response_Cruves_Bio_Extra_Bottom, ncol = 1)
+```
+
+
+
+
+
+## Supplementary Maps
+
+```{r, Map Libraries}
+library("rnaturalearth")
+library("rnaturalearthdata")
+library(ggplot2)
+library(cowplot)
+library(ggspatial)
+```
+
+```{r, Supplementary Maps}
+
+world <- ne_countries(scale = "large", returnclass = "sf")
+# get data for map background
+
+Data_Unfiltered <- read.csv("C:/Users/antho/OneDrive - The University of Alabama/Niche_Modeling_Rivulus/Rivulus_Present.csv") %>%
+  dplyr::select(Latitude, Longitude) %>%
+  unique() %>%
+  dplyr::filter(Longitude > -86.5 & Longitude < -79.5 & Latitude > 24)
+
+Map.Florida<- ggplot(data = world) +
+    geom_sf(fill= "antiquewhite", 
+            color = "black") +
+  geom_point(data = occs, 
+             aes(x = x, 
+                 y = y),
+             shape=21 , 
+             size = 3, 
+             color = "white",
+             fill = "black") +  
+  coord_sf(xlim = c(-85, 
+                    -79.5),
+           ylim = c(24,
+                    30)) +
+  annotation_scale(location = "br",
+                   width_hint = 0.5) +
+  annotation_north_arrow(location = "tr", 
+                         which_north = "true", 
+        style = north_arrow_fancy_orienteering) +
+  xlab("Longitude") + 
+  ylab("Latitude") + 
+  theme(panel.grid.major = element_line(color = gray(.5), 
+                                        linetype = "dashed",
+                                        size = 0.5), 
+        panel.background = element_rect(fill = "aliceblue"),
+        panel.border = element_rect(colour = "black",
+                                    fill=NA),
+        plot.margin = margin(2,
+                             0,
+                             0,
+                             0),
+        plot.title = element_text(hjust = 0.5,
+                                  family = "serif"),
+        text = element_text(family = "serif")) +
+  ggtitle(label = "Occurrence Localities")
+}
