@@ -28,7 +28,7 @@ knitr.duplicate.label = "allow"
 
 ## Introduction
 
-The following code was used to complete all niche modeling and analysis. The code is broken down into sections based on the analysis and the time period. Furthermore, comments are included to explain the code for future users. 
+The following code was used to complete all niche modeling and analysis. The code is broken down into sections based on the analysis and the time period. Furthermore, comments are included to explain the code for future user. Upon reflection, the code could be easily distilled by creating functions that could be applied to a list of data/objects. However, we do not wish to change the code as this is the original code used for the manuscript. 
 
 ## R packages used
 
@@ -1263,8 +1263,9 @@ Biological_Percetage_Transition_Graph_Color <- ggplot(Biological_Percentage_Tran
   geom_bar(position = "stack", stat="identity") +
   scale_fill_brewer(palette="Paired",
                     name = "Transition", 
-                    drop = TRUE, 
-                    labels = c("Medium to High", "Low to High", "Low to Medium", "High to Medium", "Medium to Low", "High to Low", "High to High", "Medium to Medium", "Low to Low")) + 
+                    drop = FALSE, 
+                    labels = c("Medium to High", "Low to High", "Low to Medium", "High to Medium", "Medium to Low", "High to Low", "High to High", "Medium to Medium", "Low to Low")
+                    ) + 
    scale_x_discrete(guide = guide_axis(n.dodge = 2),
                     labels = c("2.6", "4.5", "6.0", "8.5")) +
   labs(x = "Representative Concentration Pathway", y = "Pecentage", fill = "Transition") + 
@@ -1571,8 +1572,9 @@ Pearson_Percetage_Transition_Graph_Color <- ggplot(Pearson_Percentage_Transition
   geom_bar(position = "stack", stat="identity") +
   scale_fill_brewer(palette="Paired",
                     name = "Transition", 
-                    drop = TRUE, 
-                    labels = c("Medium to High", "Low to High", "Low to Medium", "High to Medium", "Medium to Low", "High to Low", "High to High", "Medium to Medium", "Low to Low")) + 
+                    drop = FALSE, 
+                    labels = c("Medium to High", "Low to High", "Low to Medium", "High to Medium", "Medium to Low", "High to Low", "High to High", "Medium to Medium", "Low to Low")
+                    ) + 
    scale_x_discrete(guide = guide_axis(n.dodge = 2),
                     labels = c("2.6", "4.5", "6.0", "8.5")) +
   labs(x = "Representative Concentration Pathway", y = "Pecentage", fill = "Transition") + 
@@ -2859,7 +2861,7 @@ Response_Curves_All <- plot_grid(P_We_Q_Response_Plot + theme(axis.title.y = ele
 #here I did not combine graphs and legends in R. Due to the size of the graphic, it was easier to export as a pdf then edit it directly in Adobe.
 # For all above graphs, fine tuning for publication was done by exporting the plot as a pdf and changing fonts, sizes, and orientation in R, if need be.
 ```
-##Additional Biological Models Investigating Response curve Discrepencies
+## Additional Biological Models Investigating Response curve Discrepencies
 
 Some response curves demonstrated contradictory predictions across models. To investigate if the contradiction was a statistical artifact, we ran the models with and without some highly correlated variables to compare the response curves. The code chunks below run our additional supplementary analysis. 
 
@@ -3203,31 +3205,41 @@ world <- ne_countries(scale = "large", returnclass = "sf")
 # get data for map background
 
 Data_Unfiltered <- read.csv("C:/Users/antho/OneDrive - The University of Alabama/Niche_Modeling_Rivulus/Rivulus_Present.csv") %>%
+# read in the occurrence points
   dplyr::select(Latitude, Longitude) %>%
+# select only the variables that are needed
   unique() %>%
+# get only unique combinations so that we do not have dublicate points
   dplyr::filter(Longitude > -86.5 & Longitude < -79.5 & Latitude > 24)
-
+# constrain the points to Florida because that is the only data used in the analysis
 Map.Florida<- ggplot(data = world) +
+# use the background world map
     geom_sf(fill= "antiquewhite", 
-            color = "black") +
+            color = "black")+
+# controls the color of the land.
   geom_point(data = occs, 
              aes(x = x, 
                  y = y),
              shape=21 , 
              size = 3, 
              color = "white",
-             fill = "black") +  
+             fill = "black") +
+# plots the points and controls the size/shape
   coord_sf(xlim = c(-85, 
                     -79.5),
            ylim = c(24,
                     30)) +
+# zooms in to only include the state of Florida
   annotation_scale(location = "br",
                    width_hint = 0.5) +
+# places a scale bar in the bottom right
   annotation_north_arrow(location = "tr", 
                          which_north = "true", 
         style = north_arrow_fancy_orienteering) +
+# places a north arrow in the top right
   xlab("Longitude") + 
   ylab("Latitude") + 
+# labels the x and y axis
   theme(panel.grid.major = element_line(color = gray(.5), 
                                         linetype = "dashed",
                                         size = 0.5), 
@@ -3241,5 +3253,7 @@ Map.Florida<- ggplot(data = world) +
         plot.title = element_text(hjust = 0.5,
                                   family = "serif"),
         text = element_text(family = "serif")) +
+# controls the text font, the guidelines, the ocean color, the margins, and the title location
   ggtitle(label = "Occurrence Localities")
+# place a title
 }
