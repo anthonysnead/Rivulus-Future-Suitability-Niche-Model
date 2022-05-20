@@ -1,5 +1,6 @@
 {
-    "cursorPosition": "565,0",
+    "cursorPosition": "2,45",
     "scrollLine": "0",
-    "ignored_words": "preprocessing,ArcGIS,Geoscientific,rasters,pointid,csv,rbind,Maxent,occs,sp,AICcw,NAs,AICc,AICcs,AICw,AIcc,cloglog,dismo,nd,Rasters,geotiffs,geotiff,Schoener's,multinomial,ggpattern,cowplot,PDFs,pdf,Github,ggplot,maxent\n"
+    "ignored_words": "preprocessing,ArcGIS,Geoscientific,rasters,pointid,csv,rbind,Maxent,occs,sp,AICcw,NAs,AICc,AICcs,AICw,AIcc,cloglog,dismo,nd,Rasters,geotiffs,geotiff,Schoener's,multinomial,ggpattern,cowplot,PDFs,pdf,Github,ggplot,maxent\n",
+    "disableDependencyDiscovery": "1"
 }
